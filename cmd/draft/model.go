@@ -116,6 +116,7 @@ type model struct {
 	message      string
 	sortMode     sortMode
 	sessionID    string // set when the session is saved on quit
+	quitPending  bool   // q pressed once, awaiting confirmation
 
 	// Cached filtered+sorted view.
 	viewPlayers []int // indices into data.Players
@@ -244,11 +245,28 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Quit handling: ctrl+c quits immediately, q requires a second press.
 	switch msg.String() {
-	case "q", "ctrl+c":
+	case "ctrl+c":
 		m.saveSession()
 		return m, tea.Quit
+	case "q", "Q":
+		if m.quitPending {
+			m.saveSession()
+			return m, tea.Quit
+		}
+		m.quitPending = true
+		m.message = "press q again to quit"
+		return m, nil
+	}
 
+	// Any other key cancels a pending quit.
+	if m.quitPending {
+		m.quitPending = false
+		m.message = ""
+	}
+
+	switch msg.String() {
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -483,6 +501,11 @@ func (m model) isMyTurn() bool {
 	return myTurn
 }
 
+// isDraftComplete reports whether every pick in the draft has been made.
+func (m model) isDraftComplete() bool {
+	return m.pickNumber > m.leagueSize*squadMax
+}
+
 // nextMyPick returns the overall pick number for my next pick.
 func (m model) nextMyPick() int {
 	for pick := m.pickNumber; pick <= m.leagueSize*squadMax; pick++ {
@@ -564,12 +587,28 @@ func (m model) viewHeader() string {
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
+	// Draft is over once every slot has been picked.
+	if m.isDraftComplete() {
+		doneStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("82"))
+		header := fmt.Sprintf("%s  %s",
+			headerStyle.Render("Draft"),
+			doneStyle.Render("complete — all teams selected"),
+		)
+		if m.searchQuery != "" {
+			searchStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+			header += "  " + searchStyle.Render(fmt.Sprintf("search: %s", m.searchQuery))
+		}
+		return header
+	}
+
 	round, posInRound, myTurn := m.currentRoundPick()
 
 	var turnStr string
 	if myTurn {
 		turnStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("82"))
 		turnStr = turnStyle.Render("YOUR PICK")
+	} else if m.myPicksRemaining() == 0 {
+		turnStr = dimStyle.Render("squad full")
 	} else {
 		nextPick := m.nextMyPick()
 		picksAway := nextPick - m.pickNumber
@@ -594,7 +633,8 @@ func (m model) viewSquad() string {
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	filledStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
 
-	var parts []string
+	// One line per position so the whole squad fits on screen at once.
+	var b strings.Builder
 	for _, pos := range []string{"GK", "DEF", "MID", "FWD"} {
 		count := m.posCount(pos)
 		max := m.posMax(pos)
@@ -613,10 +653,13 @@ func (m model) viewSquad() string {
 		for i := filled; i < max; i++ {
 			slots = append(slots, dimStyle.Render("_"))
 		}
-		parts = append(parts, fmt.Sprintf("%s %s (%d/%d)", pos, strings.Join(slots, " "), count, max))
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, " %-4s %s (%d/%d)", pos, strings.Join(slots, " "), count, max)
 	}
 
-	return strings.Join(parts, "  ")
+	return b.String()
 }
 
 func (m model) viewRecommendation() string {
@@ -677,7 +720,7 @@ func (m model) viewPlayerList() string {
 	b.WriteString("\n")
 
 	// Determine visible range.
-	listHeight := m.height - 8 // reserve for header, squad, rec, footer
+	listHeight := m.height - 11 // reserve for header, squad (4 lines), rec, footer
 	if listHeight < 5 {
 		listHeight = 5
 	}
