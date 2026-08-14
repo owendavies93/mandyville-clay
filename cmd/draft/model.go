@@ -750,7 +750,7 @@ func (m model) viewRecommendation() string {
 	}
 
 	p := m.data.Players[bestIdx]
-	return recStyle.Render(fmt.Sprintf("→ %s %s (%s, %s, VORP %.1f)",
+	return recStyle.Render(fmt.Sprintf("Best next pick: %s %s (%s, %s, VORP %.1f)",
 		p.FirstName, p.LastName, p.Position, p.TeamName, p.VORP))
 }
 
