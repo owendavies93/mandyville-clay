@@ -577,7 +577,8 @@ func LoadCompetitionTiers(db *sql.DB) (map[int]CompetitionTier, error) {
 		case name == "Championship" && country == "England":
 			result[id] = TierChampionship
 		case name == "Bundesliga" || name == "Primera Division" ||
-			name == "Serie A" || name == "Ligue 1":
+			name == "Serie A" || name == "Ligue 1" ||
+			name == "Primeira Liga" || name == "Eredivisie":
 			result[id] = TierTop5
 		default:
 			result[id] = TierOther

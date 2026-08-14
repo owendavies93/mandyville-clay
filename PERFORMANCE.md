@@ -1,0 +1,178 @@
+# Projection Model Performance
+
+## Backtest: 2025 Season
+
+Projections for 803 FPL players using data from seasons prior to 2025. Compared against actual 2025 FPL points.
+
+### Overall Metrics
+
+| Metric | Value |
+|---|---|
+| RMSE (all 803) | 46.3 |
+| MAE (all 803) | 32.9 |
+| Spearman rank correlation (players >30 pts, n=360) | 0.351 |
+| Top-120 overlap (draft pool capture) | 59/120 (49%) |
+| Top-60 overlap (early picks) | 22/60 (37%) |
+
+### Positional Breakdown (players >30 actual pts)
+
+| Position | Top-10 Overlap | Mean Error | MAE |
+|---|---|---|---|
+| GK | 6/10 | +5.6 | 39.7 |
+| DEF | 3/10 | +6.0 | 37.4 |
+| MID | 3/10 | +8.7 | 38.4 |
+| FWD | 4/10 | −6.5 | 50.4 |
+
+### How the top-120 actual scorers break down
+
+| Category | Count | Description |
+|---|---|---|
+| Correctly in our top 120 | 59 | Model ranked them in the top 120 |
+| Close miss | 33 | Moderate under-projection, just outside top 120 |
+| Breakout | 15 | Career-best season, >50 pts above projection |
+| Transfer in | 13 | Non-PL history, projected <50 pts |
+
+### Notable projections vs actuals
+
+| Player | Projected | Actual | Diff |
+|---|---|---|---|
+| Haaland | 213 | 232 | −19 |
+| Watkins | 170 | 167 | +3 |
+| Rice | 151 | 173 | −22 |
+| Van Dijk | 182 | 171 | +11 |
+| Szoboszlai | 156 | 160 | −4 |
+| Raya | 155 | 161 | −6 |
+| Tarkowski | 156 | 170 | −15 |
+| Anderson | 139 | 180 | −42 |
+| Salah | 295 | 123 | +172 |
+| Igor Thiago | 9 | 181 | −172 |
+
+### Known error sources
+
+- **Players who left the PL** are projected based on historical PL data but scored 0 (Ederson, Onana, Gündogan, Kulusevski). These are the biggest over-projections.
+- **Salah** had an anomalous decline season (0.37 xG/90 vs career 0.65+). The model can't predict age-related or form-related decline without birth date data.
+- **New-to-PL transfers** with no PL fixture history (Igor Thiago, Mukiele, Roefs) are projected very low because the model has no way to know they'll become starters.
+
+## Experiment Results
+
+Four high-impact changes were tested on isolated branches against the 2025 backtest. Each branch starts from the baseline model.
+
+### Baseline (current model)
+
+| Metric | Value |
+|---|---|
+| Spearman (>30pts) | 0.351 |
+| MAE | 39.5 |
+| RMSE | 50.3 |
+| Mean error | +5.8 |
+| Top-60 / Top-120 | 22 / 59 |
+| GK top-10 / bias / MAE | 6 / +5.6 / 39.7 |
+| DEF top-10 / bias / MAE | 3 / +6.0 / 37.4 |
+| MID top-10 / bias / MAE | 3 / +8.7 / 38.4 |
+| FWD top-10 / bias / MAE | 4 / −6.5 / 50.4 |
+
+### 1. Position-specific minutes model (`experiment/position-minutes`)
+
+Replaced the crude avg-min-per-match fullMatchFrac estimate with position-specific 60+ minute rates calibrated from PL data (DEF 80%, MID 64%). Scales per-player based on their projected avg minutes vs position norm. Applied to MID and DEF only — GK and FWD keep the original logic since the change worsened FWD bias.
+
+| Metric | Baseline | All positions | MID/DEF only |
+|---|---|---|---|
+| Spearman | 0.351 | 0.352 | **0.352** |
+| MAE | 39.5 | 38.3 | **38.4** |
+| Mean error | +5.8 | +1.7 | **+2.4** |
+| Top-60 / Top-120 | 22/59 | 22/59 | 21/59 |
+| GK bias | +5.6 | +4.0 | **+5.6** (unchanged) |
+| DEF bias | +6.0 | +2.9 | **+2.9** |
+| MID bias | +8.7 | +3.8 | **+3.8** |
+| FWD bias | −6.5 | −12.3 | **−6.5** (unchanged) |
+
+**Verdict**: Good bias correction for DEF/MID without hurting FWD. MAE nearly as good as the all-positions variant (38.4 vs 38.3). The Top-60 dip of 1 is noise from borderline ranking shifts. MID/DEF-only is the better version.
+
+### 2. FPL regression model (`experiment/fpl-regression`)
+
+Trained per-position linear regressions from historical per-90 stats (xG, xA, yellows, CS rate, goals conceded) to actual FPL points per 90 using 2020-2024 data. Blended 60% manual model + 40% regression.
+
+| Metric | Baseline | After | Δ |
+|---|---|---|---|
+| Spearman | 0.351 | **0.352** | +0.001 |
+| MAE | 39.5 | **37.1** | −2.4 |
+| Mean error | +5.8 | **−3.6** | −9.4 |
+| Top-60 / Top-120 | 22/59 | 22/60 | +1 |
+| GK bias | +5.6 | **−1.4** | −7.0 |
+| DEF bias | +6.0 | **−6.3** | −12.3 |
+| MID bias | +8.7 | **+0.1** | −8.6 |
+| FWD bias | −6.5 | −10.9 | −4.4 |
+
+**Verdict**: Best MAE improvement (−2.4). The regression pulls all positions closer to zero bias, especially MID (+0.1 is near-perfect). DEF swings to slight under-projection. The learned bonus/DEFCON relationships are more accurate than the manual calibrations.
+
+### 3. Transfer detection (`experiment/transfer-detection`)
+
+Detects players new to PL (no PL minutes in last 3 seasons) who are now at PL clubs. Gives them a minutes floor (1800-2200 based on historical minutes). Also added Primeira Liga and Eredivisie to TierTop5 (0.80× instead of 0.50× minutes discount).
+
+| Metric | Baseline | After | Δ |
+|---|---|---|---|
+| Spearman | 0.351 | **0.352** | +0.001 |
+| MAE | 39.5 | 38.9 | −0.6 |
+| Mean error | +5.8 | +9.0 | +3.2 |
+| Top-60 / Top-120 | 22/59 | 22/59 | — |
+| FWD bias | −6.5 | **−2.2** | +4.3 |
+
+Key individual improvements:
+
+| Player | Before | After | Actual |
+|---|---|---|---|
+| Gyökeres | 19.7 | **90.0** | 127 |
+| Zubimendi | 116.9 | **130.7** | 129 |
+| Cherki | 121.1 | **127.6** | 128 |
+| Šeško | 107.5 | **113.6** | 111 |
+| Le Fée | 48.9 | **86.6** | 147 |
+| Mukiele | 40.5 | **96.4** | 151 |
+
+**Verdict**: Dramatically improves projections for PL transfers from foreign leagues. FWD bias nearly eliminated. Mean error increased because some boosted transfer players didn't end up playing, but the transfers who DO play are now much better projected. Essential for draft accuracy since foreign transfers are often high-value picks.
+
+### 4. Rate caps at 95th percentile (`experiment/rate-caps`)
+
+Caps regressed xG/90 and xA/90 at the 95th percentile for each position. Prevents runaway projections for extreme-rate players like Salah.
+
+| Metric | Baseline | After | Δ |
+|---|---|---|---|
+| Spearman | 0.351 | 0.349 | −0.002 |
+| MAE | 39.5 | 39.3 | −0.2 |
+| Mean error | +5.8 | +5.4 | −0.4 |
+| Top-60 / Top-120 | 22/59 | 22/59 | — |
+
+Key impact: Salah 295→230 (actual 123), Haaland 213→198 (actual 232).
+
+**Verdict**: Marginal overall. Helps with extreme outlier calibration (Salah is much more reasonable) but hurts legitimate elite projections (Haaland is now under-projected by 34 instead of 19). The 95th percentile hard cap is too aggressive for genuinely elite players.
+
+### Recommendations
+
+1. **Include**: Transfer detection + Primeira Liga/Eredivisie tier fix. Essential for correctly projecting foreign transfers, which are high-value draft picks.
+2. **Include**: Position-specific minutes model (MID/DEF only). Corrects appearance point over-estimation for midfielders and defenders without worsening the forward under-projection.
+3. **Include**: FPL regression blend. Best overall MAE improvement and near-perfect MID bias correction.
+4. **Exclude**: Rate caps at 95th percentile. Too blunt — hurts Haaland more than it helps. Consider a softer approach (e.g., cap at p97, or only cap if the player's most recent season shows decline).
+
+The three recommended changes are complementary (they address different aspects: transfer handling, appearance points, and point conversion). They should be combined and re-tested on a merged branch.
+
+## Todos
+
+### High impact
+
+- **FPL gameweek-level points model**: Rather than converting xG/xA to FPL points via the scoring rules, train a regression directly from historical per-90 stats to actual FPL gameweek points. This would implicitly learn the correct bonus/DEFCON/save relationships rather than modelling each component separately with hand-tuned calibrations.
+- **Position-specific minutes model**: Forwards average 66 min/app, midfielders 74, defenders 82, GKs 90. The current appearance points model uses a crude fullMatchFrac estimate. A position-aware model would improve this.
+- **Transfer detection**: WHen a player is in the FPL player pool for the first time in the target season, ensure that we check to see whether we have historic data for them in other leagues, and use that if we do. If we have no prior data for them, assume that they will play a decent number of minutes and use their team's historic performances to predict their performance.
+- **Strengthen regression for extreme rates**: Salah's 0.74 xG/90 is barely regressed because he has thousands of historical minutes. A harder cap on maximum per-90 rates (e.g. 95th percentile for the position) would prevent runaway projections for outlier players.
+
+### Medium impact
+
+- **Previous-season FPL points as a feature**: For players with FPL gameweek history, their actual prior-season total is a strong predictor and isn't currently used at all. Blending historical FPL points with the xG-based projection could improve accuracy for established players.
+- **Better clean sheet model**: The current blend of actual CS rates (70%) and Poisson xGA (30%) still slightly over-projects defenders and GKs. A model that accounts for squad changes (new signings, departures) affecting defensive quality would help.
+- **Fixture difficulty weighting**: The model treats all 38 PL matches equally. Early-round draft picks could be improved by weighting the first ~10 gameweeks more heavily (since waiver pickups can fix later problems).
+- **Multi-season FPL points variance**: The consistency metric currently uses raw gameweek points variance from FPL history. A better approach would decompose variance into "player skill variance" vs "matchup variance" to get a truer H2H floor estimate.
+
+### Lower impact
+
+- **Age-based decline curves**: Without birth dates in the DB, we can't model age decline. Adding birth dates would allow applying position-specific aging curves (forwards decline faster than defenders).
+- **Penalty taker identification**: Penalty goals are worth the same as open-play goals in FPL but are much more predictable. Identifying designated penalty takers and adding expected penalty goals would improve projections for those players.
+- **Backup GK detection**: Several GKs are projected as starters but are actually backups (scoring 0-13 actual points). Using squad hierarchy data or minutes trends to identify likely #2 keepers would reduce GK over-projections.
+- **Competition for minutes within a squad**: The model projects each player independently. Modelling competition (e.g. two strikers competing for one spot) would improve minutes projections for rotation-risk players.

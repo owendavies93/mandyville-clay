@@ -359,13 +359,28 @@ func (e *Engine) computeRates(p *Player, fixtures []playerFixtureRow) {
 	// that contributed to the rate calculation).
 	p.WeightedRateMinutes = weightedRateMinutes
 
+	// Check if player had any PL minutes in recent seasons.
+	var hadPLMinutes bool
+	for i, s := range seasons {
+		if i >= len(seasonWeights) {
+			break
+		}
+		if seasonMap[s].plMinutes > 0 {
+			hadPLMinutes = true
+			break
+		}
+	}
+	p.IsTransferIn = !hadPLMinutes && p.IsOnPLTeam
+
 	// Build minutes per season for projection. Use PL minutes if available,
 	// otherwise use domestic league minutes with a competition-tier discount.
+	var rawMinutesTotal float64
 	for i, s := range seasons {
 		if i >= len(seasonWeights) {
 			break
 		}
 		stats := seasonMap[s]
+		rawMinutesTotal += float64(stats.minutes)
 		projMin := stats.plMinutes
 		if projMin == 0 {
 			// Player wasn't in PL this season. Find their best
@@ -407,6 +422,7 @@ func (e *Engine) computeRates(p *Player, fixtures []playerFixtureRow) {
 			Weight:  seasonWeights[i],
 		})
 	}
+	p.RawMinutesRecent = rawMinutesTotal
 }
 
 // enrichFPLHistory adds FPL-specific data (BPS, gameweek points for consistency).
@@ -550,16 +566,35 @@ func (e *Engine) projectPlayer(p *Player) PlayerProjection {
 	// --- Convert to FPL points ---
 
 	// Appearance points: 2 for 60+ min, 1 for <60 min.
-	// Estimate fraction of appearances that are 60+ min.
-	fullMatchFrac := 0.75 // default assumption
-	if projMinutes > 0 && matchesPlayed > 0 {
-		avgMinPerMatch := projMinutes / matchesPlayed
-		if avgMinPerMatch >= 75 {
-			fullMatchFrac = 0.9
-		} else if avgMinPerMatch >= 60 {
-			fullMatchFrac = 0.8
-		} else {
-			fullMatchFrac = 0.4
+	// For MID and DEF, use position-specific 60+ minute rates
+	// calibrated from PL data, scaled by this player's projected
+	// avg minutes relative to the position norm.
+	// GK and FWD keep the original avg-min-based logic.
+	var fullMatchFrac float64
+	switch p.Position {
+	case Defender:
+		fullMatchFrac = 0.80
+		if projMinutes > 0 && matchesPlayed > 0 {
+			ratio := (projMinutes / matchesPlayed) / 77.0
+			fullMatchFrac = math.Min(0.98, fullMatchFrac*ratio)
+		}
+	case Midfielder:
+		fullMatchFrac = 0.64
+		if projMinutes > 0 && matchesPlayed > 0 {
+			ratio := (projMinutes / matchesPlayed) / 67.0
+			fullMatchFrac = math.Min(0.98, fullMatchFrac*ratio)
+		}
+	default:
+		fullMatchFrac = 0.75
+		if projMinutes > 0 && matchesPlayed > 0 {
+			avgMinPerMatch := projMinutes / matchesPlayed
+			if avgMinPerMatch >= 75 {
+				fullMatchFrac = 0.9
+			} else if avgMinPerMatch >= 60 {
+				fullMatchFrac = 0.8
+			} else {
+				fullMatchFrac = 0.4
+			}
 		}
 	}
 	proj.AppearancePoints = matchesPlayed * (fullMatchFrac*2.0 + (1.0-fullMatchFrac)*1.0)
@@ -571,14 +606,16 @@ func (e *Engine) projectPlayer(p *Player) PlayerProjection {
 
 	proj.CardPoints = -(proj.ProjectedYellows*1.0 + proj.ProjectedReds*3.0)
 
+	// Goals conceded per match (used for GC penalty and regression).
+	var gcPerMatch float64
+	if ts, ok := e.TeamStrengths[p.TeamID]; ok {
+		gcPerMatch = ts.GoalsConcededPerMatch
+	} else {
+		gcPerMatch = 1.3
+	}
+
 	// Goals conceded penalty: GK/DEF lose 1 pt per 2 goals conceded.
 	if p.Position == Goalkeeper || p.Position == Defender {
-		var gcPerMatch float64
-		if ts, ok := e.TeamStrengths[p.TeamID]; ok {
-			gcPerMatch = ts.GoalsConcededPerMatch
-		} else {
-			gcPerMatch = 1.3 // league average fallback
-		}
 		totalGC := gcPerMatch * matchesPlayed
 		proj.GoalsConcededPen = -(totalGC / 2.0)
 	}
@@ -604,7 +641,7 @@ func (e *Engine) projectPlayer(p *Player) PlayerProjection {
 		proj.SavePoints = (savesPerMatch * matchesPlayed) / 3.0
 	}
 
-	proj.ProjectedPoints = proj.AppearancePoints +
+	manualTotal := proj.AppearancePoints +
 		proj.GoalPoints +
 		proj.AssistPoints +
 		proj.CleanSheetPoints +
@@ -613,6 +650,29 @@ func (e *Engine) projectPlayer(p *Player) PlayerProjection {
 		proj.CardPoints +
 		proj.GoalsConcededPen +
 		proj.DEFCONPoints
+
+	// Regression model: FPL_per90 from per-90 stats + team context.
+	// Coefficients learned from 2020-2024 PL data via weighted OLS.
+	var fplPer90 float64
+	switch p.Position {
+	case Goalkeeper:
+		fplPer90 = -1.2808 + 9.6820*xgPer90 + 4.0947*xaPer90 + 8.4996*yellowsPer90 +
+			11.2793*csProb + 1.4993*gcPerMatch
+	case Defender:
+		fplPer90 = 0.6733 + 6.0066*xgPer90 + 4.8363*xaPer90 + 1.2720*yellowsPer90 +
+			7.5786*csProb + 0.0011*gcPerMatch
+	case Midfielder:
+		fplPer90 = 0.8004 + 6.6982*xgPer90 + 3.5295*xaPer90 - 0.0204*yellowsPer90 +
+			3.6206*csProb + 0.3866*gcPerMatch
+	case Forward:
+		fplPer90 = 3.0536 + 3.7699*xgPer90 + 5.1795*xaPer90 + 1.6508*yellowsPer90 -
+			0.6691*csProb - 0.2469*gcPerMatch
+	}
+	regressionTotal := fplPer90 * appearances90
+
+	// Blend: 60% manual (well-calibrated totals) + 40% regression
+	// (better learned bonus/DEFCON/interaction effects).
+	proj.ProjectedPoints = 0.60*manualTotal + 0.40*regressionTotal
 
 	// --- Consistency metrics ---
 	if len(p.HistoricGWPoints) > 0 {
@@ -641,8 +701,10 @@ func (e *Engine) projectPlayer(p *Player) PlayerProjection {
 // projectMinutes estimates total PL season minutes for a player.
 func (e *Engine) projectMinutes(p *Player) float64 {
 	if len(p.MinutesPerSeason) == 0 {
-		// No history — baseline depends on whether they're at a PL team.
 		if p.IsOnPLTeam {
+			if p.IsTransferIn {
+				return 1200
+			}
 			return 500
 		}
 		return 0
@@ -661,6 +723,9 @@ func (e *Engine) projectMinutes(p *Player) float64 {
 
 	if totalWeight == 0 {
 		if p.IsOnPLTeam {
+			if p.IsTransferIn {
+				return 1200
+			}
 			return 500
 		}
 		return 0
@@ -676,8 +741,18 @@ func (e *Engine) projectMinutes(p *Player) float64 {
 	mostRecent := float64(p.MinutesPerSeason[0].Minutes)
 	projected := math.Max(weightedAvg, mostRecent*0.85)
 
-	// If the trend is downward (most recent << weighted avg), trust
-	// the weighted average which already down-weights older seasons.
+	// Transfer-in boost: if a player had no PL minutes in recent
+	// seasons but is now at a PL team with significant raw minutes
+	// from other leagues, they were bought to play.
+	if p.IsTransferIn && p.RawMinutesRecent > 3000 {
+		var transferFloor float64
+		if p.RawMinutesRecent > 6000 {
+			transferFloor = 2200
+		} else {
+			transferFloor = 1800
+		}
+		projected = math.Max(projected, transferFloor)
+	}
 
 	// Cap at realistic PL maximum (38 matches * 90 min).
 	if projected > maxSeasonMinutes {

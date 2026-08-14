@@ -86,6 +86,13 @@ type Player struct {
 
 	// Weighted minutes used for rate calculations (from used seasons only).
 	WeightedRateMinutes float64
+
+	// Whether this player had no PL minutes in recent seasons
+	// (returning transfer or first PL stint).
+	IsTransferIn bool
+
+	// Raw (undiscounted) minutes across recent seasons.
+	RawMinutesRecent float64
 }
 
 // SeasonMinutes tracks total minutes played in a season with a recency weight.
