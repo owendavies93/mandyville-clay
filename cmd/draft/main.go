@@ -11,6 +11,7 @@ import (
 
 func main() {
 	input := flag.String("input", "projections.json", "projection JSON file")
+	sessionFlag := flag.String("session", "", "session ID to resume")
 	flag.Parse()
 
 	f, err := os.Open(*input)
@@ -27,9 +28,33 @@ func main() {
 	}
 
 	m := newModel(data)
+
+	// Resume an existing session when a session ID is provided.
+	if *sessionFlag != "" {
+		s, err := loadSessionByID(*sessionFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to load session %s: %v\n", *sessionFlag, err)
+			os.Exit(1)
+		}
+		if err := m.applySession(s); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to resume session %s: %v\n", *sessionFlag, err)
+			os.Exit(1)
+		}
+		m.mode = modeNormal
+		m.recalcVORP()
+		m.rebuildView()
+	}
+
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	final, err := p.Run()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Report the new session ID so the draft can be resumed later.
+	if fm, ok := final.(model); ok && fm.sessionID != "" {
+		fmt.Printf("session saved as: %s\n", fm.sessionID)
+		fmt.Printf("resume with: -session %s\n", fm.sessionID)
 	}
 }

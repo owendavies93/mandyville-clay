@@ -60,6 +60,36 @@ const (
 	modeSetup
 )
 
+type sortMode int
+
+const (
+	sortVORP sortMode = iota
+	sortH2H
+	sortPoints
+)
+
+func (s sortMode) String() string {
+	switch s {
+	case sortH2H:
+		return "H2H"
+	case sortPoints:
+		return "PTS"
+	default:
+		return "VORP"
+	}
+}
+
+func (s sortMode) value(p Player) float64 {
+	switch s {
+	case sortH2H:
+		return p.H2HAdjustedPts
+	case sortPoints:
+		return p.ProjectedPoints
+	default:
+		return p.VORP
+	}
+}
+
 type undoEntry struct {
 	playerIdx int
 	prevState DraftState
@@ -84,7 +114,8 @@ type model struct {
 	setupInput   textinput.Model
 	setupStep    int // 0 = league size, 1 = draft position
 	message      string
-	sortByH2H    bool
+	sortMode     sortMode
+	sessionID    string // set when the session is saved on quit
 
 	// Cached filtered+sorted view.
 	viewPlayers []int // indices into data.Players
@@ -108,7 +139,7 @@ func newModel(data ProjectionData) model {
 		searchInput: si,
 		setupInput:  setup,
 		setupStep:   0,
-		sortByH2H:   true,
+		sortMode:    sortVORP,
 	}
 	m.rebuildView()
 	return m
@@ -187,6 +218,9 @@ func (m model) updateSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "ctrl+c":
+		m.saveSession()
+		return m, tea.Quit
 	case "esc":
 		m.mode = modeNormal
 		m.searchQuery = ""
@@ -212,6 +246,7 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
+		m.saveSession()
 		return m, tea.Quit
 
 	case "up", "k":
@@ -252,38 +287,38 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "d":
-		// Draft player for my team.
-		if len(m.viewPlayers) > 0 && m.cursor < len(m.viewPlayers) {
-			idx := m.viewPlayers[m.cursor]
-			if m.playerState[idx] == Available {
-				pos := m.data.Players[idx].Position
-				if m.posCount(pos) >= m.posMax(pos) {
-					m.message = fmt.Sprintf("squad full at %s", pos)
-				} else {
-					m.undoStack = append(m.undoStack, undoEntry{idx, Available, m.pickNumber})
-					m.playerState[idx] = DraftedByMe
-					m.mySquad = append(m.mySquad, idx)
-					m.pickNumber++
-					m.message = fmt.Sprintf("drafted %s %s", m.data.Players[idx].FirstName, m.data.Players[idx].LastName)
-					m.recalcVORP()
-					m.rebuildView()
-				}
-			}
+		// Pick the highlighted player for whoever's turn it is:
+		// drafts to my squad on my turn, otherwise marks as an
+		// opponent's pick.
+		if len(m.viewPlayers) == 0 || m.cursor >= len(m.viewPlayers) {
+			return m, nil
+		}
+		idx := m.viewPlayers[m.cursor]
+		if m.playerState[idx] != Available {
+			return m, nil
 		}
 
-	case "t":
-		// Mark player as taken by opponent.
-		if len(m.viewPlayers) > 0 && m.cursor < len(m.viewPlayers) {
-			idx := m.viewPlayers[m.cursor]
-			if m.playerState[idx] == Available {
-				m.undoStack = append(m.undoStack, undoEntry{idx, Available, m.pickNumber})
-				m.playerState[idx] = TakenByOpponent
-				m.pickNumber++
-				m.message = fmt.Sprintf("%s %s taken", m.data.Players[idx].FirstName, m.data.Players[idx].LastName)
-				m.recalcVORP()
-				m.rebuildView()
+		name := fmt.Sprintf("%s %s", m.data.Players[idx].FirstName, m.data.Players[idx].LastName)
+
+		if m.isMyTurn() {
+			pos := m.data.Players[idx].Position
+			if m.posCount(pos) >= m.posMax(pos) {
+				m.message = fmt.Sprintf("squad full at %s", pos)
+				return m, nil
 			}
+			m.undoStack = append(m.undoStack, undoEntry{idx, Available, m.pickNumber})
+			m.playerState[idx] = DraftedByMe
+			m.mySquad = append(m.mySquad, idx)
+			m.pickNumber++
+			m.message = "drafted " + name
+		} else {
+			m.undoStack = append(m.undoStack, undoEntry{idx, Available, m.pickNumber})
+			m.playerState[idx] = TakenByOpponent
+			m.pickNumber++
+			m.message = name + " taken"
 		}
+		m.recalcVORP()
+		m.rebuildView()
 
 	case "u":
 		// Undo last action.
@@ -307,7 +342,7 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "s":
-		m.sortByH2H = !m.sortByH2H
+		m.sortMode = (m.sortMode + 1) % 3
 		m.rebuildView()
 	}
 
@@ -335,10 +370,10 @@ func (m *model) rebuildView() {
 		m.viewPlayers = append(m.viewPlayers, i)
 	}
 
-	// Sort by VORP descending (already sorted in data, but recalc may change order).
+	// Sort by the active metric, descending.
 	sort.Slice(m.viewPlayers, func(a, b int) bool {
 		ia, ib := m.viewPlayers[a], m.viewPlayers[b]
-		return m.data.Players[ia].VORP > m.data.Players[ib].VORP
+		return m.sortMode.value(m.data.Players[ia]) > m.sortMode.value(m.data.Players[ib])
 	})
 
 	if m.cursor >= len(m.viewPlayers) {
@@ -440,6 +475,12 @@ func (m model) currentRoundPick() (int, int, bool) {
 		myTurn = posInRound == (m.leagueSize - m.draftPos + 1)
 	}
 	return round, posInRound, myTurn
+}
+
+// isMyTurn reports whether the current pick belongs to me.
+func (m model) isMyTurn() bool {
+	_, _, myTurn := m.currentRoundPick()
+	return myTurn
 }
 
 // nextMyPick returns the overall pick number for my next pick.
@@ -629,10 +670,7 @@ func (m model) viewPlayerList() string {
 	// Header row.
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("240"))
 	filterLabel := m.filter.String()
-	sortLabel := "VORP"
-	if m.sortByH2H {
-		sortLabel = "VORP"
-	}
+	sortLabel := m.sortMode.String()
 	b.WriteString(headerStyle.Render(fmt.Sprintf(
 		" %-3s %-20s %-4s %-22s %6s %6s %6s",
 		"#", "Player", "Pos", "Team", "Pts", sortLabel, "["+filterLabel+"]")))
@@ -679,7 +717,7 @@ func (m model) viewPlayerList() string {
 		posStr := posStyle.Render(fmt.Sprintf("%-4s", p.Position))
 
 		line := fmt.Sprintf(" %-3d %-20s %s %-22s %6.1f %6.1f",
-			vi+1, name, posStr, team, p.ProjectedPoints, p.VORP)
+			vi+1, name, posStr, team, p.ProjectedPoints, m.sortMode.value(p))
 
 		if vi == m.cursor {
 			b.WriteString(selectedStyle.Render(line))
@@ -697,8 +735,7 @@ func (m model) viewFooter() string {
 	msgStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
 
 	var parts []string
-	parts = append(parts, "[d]raft")
-	parts = append(parts, "[t]aken")
+	parts = append(parts, "[d]pick")
 	parts = append(parts, "[f]ilter")
 	parts = append(parts, "[/]search")
 	parts = append(parts, "[u]ndo")

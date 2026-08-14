@@ -10,9 +10,8 @@ import (
 const (
 	// Season weights for per-90 rate calculations.
 	// Index 0 = most recent season, etc.
-	seasonWeight0 = 0.50
+	seasonWeight0 = 0.70
 	seasonWeight1 = 0.30
-	seasonWeight2 = 0.20
 
 	// Minimum minutes for reliable per-90 rates.
 	minMinutesForRates = 450 // ~5 full matches
@@ -36,7 +35,7 @@ const (
 	defconProbGK  = 0.10 // goalkeepers
 )
 
-var seasonWeights = []float64{seasonWeight0, seasonWeight1, seasonWeight2}
+var seasonWeights = []float64{seasonWeight0, seasonWeight1}
 
 // Engine runs projections for a set of players.
 type Engine struct {
