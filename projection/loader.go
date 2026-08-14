@@ -367,8 +367,8 @@ func LoadPlayerTeams(db *sql.DB, playerIDs []int, targetSeason int) (map[int]Pla
 	result := make(map[int]PlayerTeamInfo)
 
 	// First: check target season PL fixture data for team assignments.
-	// By draft day, transfers are known and players appear in target
-	// season fixtures for their new teams.
+	// Use the earliest fixture to get the player's team at the start
+	// of the season (before any January transfers).
 	targetQuery := `
 		SELECT DISTINCT ON (pf.player_id)
 		       pf.player_id, pf.team_id, t.name
@@ -378,7 +378,7 @@ func LoadPlayerTeams(db *sql.DB, playerIDs []int, targetSeason int) (map[int]Pla
 		WHERE pf.player_id = ANY($1)
 		  AND f.season = $2
 		  AND f.competition_id = $3
-		ORDER BY pf.player_id, f.fixture_date DESC
+		ORDER BY pf.player_id, f.fixture_date ASC
 	`
 	tRows, err := db.Query(targetQuery, playerIDs, targetSeason, englishPLCompetitionID)
 	if err != nil {
