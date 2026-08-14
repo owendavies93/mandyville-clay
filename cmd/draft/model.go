@@ -97,26 +97,28 @@ type undoEntry struct {
 }
 
 type model struct {
-	data         ProjectionData
-	playerState  []DraftState // indexed same as data.Players
-	mySquad      []int        // indices into data.Players
-	cursor       int
-	filter       posFilter
-	mode         mode
-	searchInput  textinput.Model
-	searchQuery  string
-	width        int
-	height       int
-	undoStack    []undoEntry
-	pickNumber   int // current overall pick number (1-indexed)
-	draftPos     int // my draft position (1-indexed)
-	leagueSize   int
-	setupInput   textinput.Model
-	setupStep    int // 0 = league size, 1 = draft position
-	message      string
-	sortMode     sortMode
-	sessionID    string // set when the session is saved on quit
-	quitPending  bool   // q pressed once, awaiting confirmation
+	data        ProjectionData
+	playerState []DraftState // indexed same as data.Players
+	mySquad     []int        // indices into data.Players
+	cursor      int
+	filter      posFilter
+	mode        mode
+	searchInput textinput.Model
+	searchQuery string
+	width       int
+	height      int
+	undoStack   []undoEntry
+	pickNumber  int // current overall pick number (1-indexed)
+	draftPos    int // my draft position (1-indexed)
+	leagueSize  int
+	setupInput  textinput.Model
+	setupStep   int // 0 = league size, 1 = draft position
+	message     string
+	sortMode    sortMode
+	sessionID   string // set when the session is saved on quit
+	quitPending bool   // q pressed once, awaiting confirmation
+	picks       []draftPick
+	resultPath  string // set when the final draft state is saved
 
 	// Cached filtered+sorted view.
 	viewPlayers []int // indices into data.Players
@@ -220,6 +222,7 @@ func (m model) updateSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
+		m.ensureFinalResultSaved()
 		m.saveSession()
 		return m, tea.Quit
 	case "esc":
@@ -248,10 +251,12 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Quit handling: ctrl+c quits immediately, q requires a second press.
 	switch msg.String() {
 	case "ctrl+c":
+		m.ensureFinalResultSaved()
 		m.saveSession()
 		return m, tea.Quit
 	case "q", "Q":
 		if m.quitPending {
+			m.ensureFinalResultSaved()
 			m.saveSession()
 			return m, tea.Quit
 		}
@@ -317,13 +322,29 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 		name := fmt.Sprintf("%s %s", m.data.Players[idx].FirstName, m.data.Players[idx].LastName)
+		pos := m.data.Players[idx].Position
+		team := m.teamAtPick(m.pickNumber)
+
+		// Validate the picking team's positional limits before recording,
+		// so a rejected attempt doesn't leave a phantom pick in history.
+		if m.teamPosCount(team, pos) >= m.posMax(pos) {
+			if m.isMyTurn() {
+				m.message = fmt.Sprintf("squad full at %s", pos)
+			} else {
+				m.message = fmt.Sprintf("team %d full at %s", team, pos)
+			}
+			return m, nil
+		}
+
+		m.picks = append(m.picks, draftPick{
+			PickNumber: m.pickNumber,
+			Round:      ((m.pickNumber - 1) / m.leagueSize) + 1,
+			Team:       team,
+			PlayerID:   m.data.Players[idx].PlayerID,
+			Position:   pos,
+		})
 
 		if m.isMyTurn() {
-			pos := m.data.Players[idx].Position
-			if m.posCount(pos) >= m.posMax(pos) {
-				m.message = fmt.Sprintf("squad full at %s", pos)
-				return m, nil
-			}
 			m.undoStack = append(m.undoStack, undoEntry{idx, Available, m.pickNumber})
 			m.playerState[idx] = DraftedByMe
 			m.mySquad = append(m.mySquad, idx)
@@ -338,6 +359,14 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.recalcVORP()
 		m.rebuildView()
 
+		if m.isDraftComplete() {
+			if err := m.saveFinalResult(); err != nil {
+				m.message = "draft complete, failed to save result: " + err.Error()
+			} else {
+				m.message = "draft complete — saved to " + m.resultPath
+			}
+		}
+
 	case "u":
 		// Undo last action.
 		if len(m.undoStack) > 0 {
@@ -345,6 +374,10 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.undoStack = m.undoStack[:len(m.undoStack)-1]
 			m.playerState[entry.playerIdx] = entry.prevState
 			m.pickNumber = entry.prevPick
+			// Drop the corresponding pick record.
+			if len(m.picks) > 0 && m.picks[len(m.picks)-1].PickNumber == entry.prevPick {
+				m.picks = m.picks[:len(m.picks)-1]
+			}
 			if entry.prevState == Available {
 				// Remove from my squad if it was a draft.
 				for i, si := range m.mySquad {
@@ -474,6 +507,18 @@ func (m model) posMax(pos string) int {
 	return 0
 }
 
+// teamPosCount returns how many players the given team has drafted at a
+// position, derived from the pick history.
+func (m model) teamPosCount(team int, pos string) int {
+	count := 0
+	for _, pk := range m.picks {
+		if pk.Team == team && pk.Position == pos {
+			count++
+		}
+	}
+	return count
+}
+
 // currentRoundPick returns which round and pick within the round.
 func (m model) currentRoundPick() (int, int, bool) {
 	if m.draftPos == 0 {
@@ -499,6 +544,16 @@ func (m model) currentRoundPick() (int, int, bool) {
 func (m model) isMyTurn() bool {
 	_, _, myTurn := m.currentRoundPick()
 	return myTurn
+}
+
+// teamAtPick returns the 1-indexed team number selecting at the given pick.
+func (m model) teamAtPick(pickNumber int) int {
+	round := ((pickNumber - 1) / m.leagueSize) + 1
+	posInRound := ((pickNumber - 1) % m.leagueSize) + 1
+	if round%2 == 1 {
+		return posInRound
+	}
+	return m.leagueSize - posInRound + 1
 }
 
 // isDraftComplete reports whether every pick in the draft has been made.

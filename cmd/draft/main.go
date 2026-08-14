@@ -53,8 +53,13 @@ func main() {
 	}
 
 	// Report the new session ID so the draft can be resumed later.
-	if fm, ok := final.(model); ok && fm.sessionID != "" {
-		fmt.Printf("session saved as: %s\n", fm.sessionID)
-		fmt.Printf("resume with: -session %s\n", fm.sessionID)
+	if fm, ok := final.(model); ok {
+		if fm.sessionID != "" {
+			fmt.Printf("session saved as: %s\n", fm.sessionID)
+			fmt.Printf("resume with: -session %s\n", fm.sessionID)
+		}
+		if fm.resultPath != "" {
+			fmt.Printf("final draft state saved to: %s\n", fm.resultPath)
+		}
 	}
 }
