@@ -19,6 +19,7 @@ PostgreSQL `mandyville` on `localhost:5432` (user: `postgres`, pass: `password`)
 - Evaluate with `python3 evaluate.py backtest_2025.json` (not committed — local utility)
 - When testing model changes, use isolated branches and compare metrics against the baseline in PERFORMANCE.md
 - The TUI requires a TTY and cannot be tested in headless environments
+- Output files to the /out directory, create test scripts in the scratch directory
 
 ## Model Changes
 
