@@ -165,3 +165,16 @@ type ProjectionOutput struct {
 	LeagueSize  int                 `json:"league_size"`
 	Players     []PlayerProjection  `json:"players"`
 }
+
+// TeamFixture is a single fixture for a team in a given gameweek.
+type TeamFixture struct {
+	Gameweek   int
+	OpponentID int
+	IsHome     bool
+}
+
+// PlayerPrice holds a player's starting price for a season.
+// Team assignment comes from LoadPlayerTeams (players_teams table).
+type PlayerPrice struct {
+	Price float64
+}

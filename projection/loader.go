@@ -666,3 +666,95 @@ func LoadPositionNames(db *sql.DB) (map[int]string, error) {
 	}
 	return result, rows.Err()
 }
+
+// LoadPlayerPrices returns each player's starting price for a season.
+// It first tries fpl_season_info.starting_price, then falls back to
+// GW1 values from fpl_players_gameweeks. Team assignment is handled
+// separately via LoadPlayerTeams (players_teams table).
+func LoadPlayerPrices(db *sql.DB, season int) (map[int]PlayerPrice, error) {
+	result := make(map[int]PlayerPrice)
+
+	// Primary source: starting_price in fpl_season_info.
+	rows, err := db.Query(`
+		SELECT fsi.player_id, fsi.starting_price
+		FROM fpl_season_info fsi
+		WHERE fsi.season = $1 AND fsi.starting_price IS NOT NULL
+	`, season)
+	if err != nil {
+		return nil, fmt.Errorf("loading starting prices: %w", err)
+	}
+	for rows.Next() {
+		var pid int
+		var price float64
+		if err := rows.Scan(&pid, &price); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		result[pid] = PlayerPrice{Price: price}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(result) > 0 {
+		return result, nil
+	}
+
+	// Fallback: GW1 values from FPL gameweek data (no team_id available).
+	rows, err = db.Query(`
+		SELECT pg.player_id, pg.value
+		FROM fpl_players_gameweeks pg
+		JOIN fpl_gameweeks g ON g.id = pg.fpl_gameweek_id
+		WHERE g.season = $1 AND g.gameweek = 1 AND pg.value IS NOT NULL
+	`, season)
+	if err != nil {
+		return nil, fmt.Errorf("loading gameweek 1 prices: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid int
+		var price float64
+		if err := rows.Scan(&pid, &price); err != nil {
+			return nil, err
+		}
+		result[pid] = PlayerPrice{Price: price}
+	}
+	return result, rows.Err()
+}
+
+// LoadFixturesByGameweek returns the first numGWs fixtures for each PL
+// team in a season, using the fixtures_fpl_gameweeks mapping table.
+func LoadFixturesByGameweek(db *sql.DB, season, numGWs int) (map[int][]TeamFixture, error) {
+	rows, err := db.Query(`
+		SELECT f.home_team_id, f.away_team_id, g.gameweek
+		FROM fixtures_fpl_gameweeks ffg
+		JOIN fixtures f ON f.id = ffg.fixture_id
+		JOIN fpl_gameweeks g ON g.id = ffg.gameweek_id
+		WHERE f.competition_id = $1 AND g.season = $2 AND g.gameweek <= $3
+		ORDER BY g.gameweek, f.fixture_date
+	`, englishPLCompetitionID, season, numGWs)
+	if err != nil {
+		return nil, fmt.Errorf("loading fixtures by gameweek: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[int][]TeamFixture)
+	for rows.Next() {
+		var homeID, awayID, gw int
+		if err := rows.Scan(&homeID, &awayID, &gw); err != nil {
+			return nil, err
+		}
+		result[homeID] = append(result[homeID], TeamFixture{
+			Gameweek:   gw,
+			OpponentID: awayID,
+			IsHome:     true,
+		})
+		result[awayID] = append(result[awayID], TeamFixture{
+			Gameweek:   gw,
+			OpponentID: homeID,
+			IsHome:     false,
+		})
+	}
+	return result, rows.Err()
+}
