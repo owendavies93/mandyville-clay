@@ -122,6 +122,7 @@ type PlayerProjection struct {
 	PlayerID  int    `json:"player_id"`
 	FirstName string `json:"first_name"`
 	LastName  string `json:"last_name"`
+	TeamID    int    `json:"team_id"`
 	TeamName  string `json:"team"`
 	Position  string `json:"position"`
 

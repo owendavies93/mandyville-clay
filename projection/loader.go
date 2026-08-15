@@ -338,10 +338,14 @@ type PlayerTeamInfo struct {
 	IsPL     bool
 }
 
-// LoadPlayerTeams finds each player's current team. It first checks the
-// target season's fixture data (transfers are known by draft day), then
-// falls back to the most recent fixture before the target season.
-func LoadPlayerTeams(db *sql.DB, playerIDs []int, targetSeason int) (map[int]PlayerTeamInfo, error) {
+// LoadPlayerTeams finds each player's team for the target season using the
+// players_teams table as the single source of truth.
+//
+// For upcoming seasons (non-backtest) it uses the player's current team
+// (the players_teams row with no end date). For backtests it uses the team
+// the player was at when the summer transfer window closed. Players not
+// matched by either query fall back to their most recent team entry.
+func LoadPlayerTeams(db *sql.DB, playerIDs []int, targetSeason int, backtest bool) (map[int]PlayerTeamInfo, error) {
 	// Get the set of PL teams for the target season.
 	plTeams := make(map[int]bool)
 	plQuery := `
@@ -366,71 +370,17 @@ func LoadPlayerTeams(db *sql.DB, playerIDs []int, targetSeason int) (map[int]Pla
 
 	result := make(map[int]PlayerTeamInfo)
 
-	// First: check target season PL fixture data for team assignments.
-	// Use the earliest fixture to get the player's team at the start
-	// of the season (before any January transfers).
-	targetQuery := `
-		SELECT DISTINCT ON (pf.player_id)
-		       pf.player_id, pf.team_id, t.name
-		FROM players_fixtures pf
-		JOIN fixtures f ON f.id = pf.fixture_id
-		JOIN teams t ON t.id = pf.team_id
-		WHERE pf.player_id = ANY($1)
-		  AND f.season = $2
-		  AND f.competition_id = $3
-		ORDER BY pf.player_id, f.fixture_date ASC
-	`
-	tRows, err := db.Query(targetQuery, playerIDs, targetSeason, englishPLCompetitionID)
-	if err != nil {
-		return nil, fmt.Errorf("loading target season teams: %w", err)
-	}
-	defer tRows.Close()
-	for tRows.Next() {
-		var playerID, teamID int
-		var teamName string
-		if err := tRows.Scan(&playerID, &teamID, &teamName); err != nil {
-			return nil, err
-		}
-		result[playerID] = PlayerTeamInfo{
-			TeamID:   teamID,
-			TeamName: teamName,
-			IsPL:     true,
-		}
-	}
-	if err := tRows.Err(); err != nil {
-		return nil, err
-	}
-
-	// Second: for players not found in target season, use most recent
-	// fixture from any season/competition.
-	var missing []int
-	for _, pid := range playerIDs {
-		if _, ok := result[pid]; !ok {
-			missing = append(missing, pid)
-		}
-	}
-
-	if len(missing) > 0 {
-		fallbackQuery := `
-			SELECT DISTINCT ON (pf.player_id)
-			       pf.player_id, pf.team_id, t.name
-			FROM players_fixtures pf
-			JOIN fixtures f ON f.id = pf.fixture_id
-			JOIN teams t ON t.id = pf.team_id
-			WHERE pf.player_id = ANY($1)
-			  AND f.season < $2
-			ORDER BY pf.player_id, f.fixture_date DESC
-		`
-		fRows, err := db.Query(fallbackQuery, missing, targetSeason)
+	scanTeams := func(query string, args ...interface{}) error {
+		rows, err := db.Query(query, args...)
 		if err != nil {
-			return nil, fmt.Errorf("loading fallback teams: %w", err)
+			return err
 		}
-		defer fRows.Close()
-		for fRows.Next() {
+		defer rows.Close()
+		for rows.Next() {
 			var playerID, teamID int
 			var teamName string
-			if err := fRows.Scan(&playerID, &teamID, &teamName); err != nil {
-				return nil, err
+			if err := rows.Scan(&playerID, &teamID, &teamName); err != nil {
+				return err
 			}
 			result[playerID] = PlayerTeamInfo{
 				TeamID:   teamID,
@@ -438,12 +388,85 @@ func LoadPlayerTeams(db *sql.DB, playerIDs []int, targetSeason int) (map[int]Pla
 				IsPL:     plTeams[teamID],
 			}
 		}
-		if err := fRows.Err(); err != nil {
+		return rows.Err()
+	}
+
+	if backtest {
+		// Team the player was at when the summer window closed, so
+		// summer transfers are captured but January moves are not.
+		cutoff, err := loadTeamCutoffDate(db, targetSeason)
+		if err != nil {
 			return nil, err
+		}
+		query := `
+			SELECT DISTINCT ON (pt.player_id)
+			       pt.player_id, pt.team_id, t.name
+			FROM players_teams pt
+			JOIN teams t ON t.id = pt.team_id
+			WHERE pt.player_id = ANY($1)
+			  AND pt.start_date <= $2::date
+			  AND (pt.end_date IS NULL OR pt.end_date > $2::date)
+			ORDER BY pt.player_id, pt.start_date DESC
+		`
+		if err := scanTeams(query, playerIDs, cutoff); err != nil {
+			return nil, fmt.Errorf("loading season-start teams: %w", err)
+		}
+	} else {
+		// Current team for the upcoming season.
+		query := `
+			SELECT DISTINCT ON (pt.player_id)
+			       pt.player_id, pt.team_id, t.name
+			FROM players_teams pt
+			JOIN teams t ON t.id = pt.team_id
+			WHERE pt.player_id = ANY($1)
+			  AND pt.end_date IS NULL
+			ORDER BY pt.player_id, pt.start_date DESC
+		`
+		if err := scanTeams(query, playerIDs); err != nil {
+			return nil, fmt.Errorf("loading current teams: %w", err)
+		}
+	}
+
+	// Fallback: players without a matching entry use their most recent
+	// players_teams entry.
+	var missing []int
+	for _, pid := range playerIDs {
+		if _, ok := result[pid]; !ok {
+			missing = append(missing, pid)
+		}
+	}
+	if len(missing) > 0 {
+		fallbackQuery := `
+			SELECT DISTINCT ON (pt.player_id)
+			       pt.player_id, pt.team_id, t.name
+			FROM players_teams pt
+			JOIN teams t ON t.id = pt.team_id
+			WHERE pt.player_id = ANY($1)
+			ORDER BY pt.player_id, pt.start_date DESC
+		`
+		if err := scanTeams(fallbackQuery, missing); err != nil {
+			return nil, fmt.Errorf("loading fallback teams: %w", err)
 		}
 	}
 
 	return result, nil
+}
+
+// loadTeamCutoffDate returns the date used to anchor "team at season start"
+// lookups in players_teams: the first of September in the season's starting
+// calendar year. This captures summer transfers (which complete around the
+// transfer deadline) while excluding January moves.
+func loadTeamCutoffDate(db *sql.DB, season int) (string, error) {
+	var d string
+	err := db.QueryRow(`
+		SELECT (date_trunc('year', min(fixture_date)) + interval '8 months')::date::text
+		FROM fixtures
+		WHERE competition_id = $1 AND season = $2
+	`, englishPLCompetitionID, season).Scan(&d)
+	if err != nil {
+		return "", fmt.Errorf("loading team cutoff date: %w", err)
+	}
+	return d, nil
 }
 
 // LoadPlayersFromFixtures builds a player pool from everyone who appeared

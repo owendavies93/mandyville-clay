@@ -136,7 +136,7 @@ func (e *Engine) Run() (*ProjectionOutput, error) {
 	}
 
 	// 7. Load player teams.
-	playerTeams, err := LoadPlayerTeams(e.DB, playerIDs, e.TargetSeason)
+	playerTeams, err := LoadPlayerTeams(e.DB, playerIDs, e.TargetSeason, e.Backtest)
 	if err != nil {
 		return nil, fmt.Errorf("loading player teams: %w", err)
 	}
@@ -500,6 +500,7 @@ func (e *Engine) projectPlayer(p *Player) PlayerProjection {
 		PlayerID:  p.ID,
 		FirstName: p.FirstName,
 		LastName:  p.LastName,
+		TeamID:    p.TeamID,
 		TeamName:  p.TeamName,
 		Position:  p.Position.String(),
 	}
