@@ -78,11 +78,12 @@ func main() {
 	budget := flag.Float64("budget", 100.0, "total budget in millions")
 	season := flag.Int("season", 2026, "season for prices and fixtures")
 	gameweeks := flag.Int("gameweeks", 6, "number of opening gameweeks to optimise for")
-	dbHost := flag.String("db-host", "localhost", "database host")
-	dbPort := flag.Int("db-port", 5432, "database port")
-	dbUser := flag.String("db-user", "postgres", "database user")
-	dbPass := flag.String("db-pass", "password", "database password")
-	dbName := flag.String("db-name", "mandyville", "database name")
+	configFile := flag.String("config", "", "path to mandyville config.yaml")
+	dbHost := flag.String("db-host", "", "database host")
+	dbPort := flag.Int("db-port", 0, "database port")
+	dbUser := flag.String("db-user", "", "database user")
+	dbPass := flag.String("db-pass", "", "database password")
+	dbName := flag.String("db-name", "", "database name")
 	flag.Parse()
 
 	if *gameweeks < 1 || *gameweeks > 38 {
@@ -105,11 +106,34 @@ func main() {
 	}
 
 	cfg := projection.DBConfig{
-		Host:     *dbHost,
-		Port:     *dbPort,
-		User:     *dbUser,
-		Password: *dbPass,
-		DBName:   *dbName,
+		Host:     "localhost",
+		Port:     5432,
+		User:     "postgres",
+		Password: "password",
+		DBName:   "mandyville",
+	}
+	if *configFile != "" {
+		var err error
+		cfg, err = projection.LoadDBConfigFromFile(*configFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if *dbHost != "" {
+		cfg.Host = *dbHost
+	}
+	if *dbPort != 0 {
+		cfg.Port = *dbPort
+	}
+	if *dbUser != "" {
+		cfg.User = *dbUser
+	}
+	if *dbPass != "" {
+		cfg.Password = *dbPass
+	}
+	if *dbName != "" {
+		cfg.DBName = *dbName
 	}
 	db, err := projection.OpenDB(cfg)
 	if err != nil {
