@@ -259,26 +259,44 @@ history for this section.
   minutes rely on a single prior season, or who moved club in the summer,
   would have avoided Bijol and O'Nien. A variance-aware objective (maximise
   expected points minus k × minutes uncertainty) is the natural fix.
-- **Captaincy is bounded by projection quality**: weekly re-picking is
-  already implemented and gains nothing, because fixture adjustment cannot
-  overturn a mis-ranked player. The 54-point gap to a perfect captain closes
-  only by improving the underlying points model for premium attackers.
-
-- **FPL gameweek-level points model**: Rather than converting xG/xA to FPL points via the scoring rules, train a regression directly from historical per-90 stats to actual FPL gameweek points. This would implicitly learn the correct bonus/DEFCON/save relationships rather than modelling each component separately with hand-tuned calibrations.
-- **Position-specific minutes model**: Forwards average 66 min/app, midfielders 74, defenders 82, GKs 90. The current appearance points model uses a crude fullMatchFrac estimate. A position-aware model would improve this.
-- **Transfer detection**: WHen a player is in the FPL player pool for the first time in the target season, ensure that we check to see whether we have historic data for them in other leagues, and use that if we do. If we have no prior data for them, assume that they will play a decent number of minutes and use their team's historic performances to predict their performance.
-- **Strengthen regression for extreme rates**: Salah's 0.74 xG/90 is barely regressed because he has thousands of historical minutes. A harder cap on maximum per-90 rates (e.g. 95th percentile for the position) would prevent runaway projections for outlier players.
+- **Softer rate caps for extreme per-90 rates**: The 95th percentile hard
+  cap was tested and excluded (hurts Haaland more than it helps). A softer
+  approach — e.g. cap at p97, or only cap when the most recent season shows
+  decline — could tame runaway projections for outlier players like Salah
+  without penalising genuinely elite ones.
 
 ### Medium impact
 
-- **Previous-season FPL points as a feature**: For players with FPL gameweek history, their actual prior-season total is a strong predictor and isn't currently used at all. Blending historical FPL points with the xG-based projection could improve accuracy for established players.
-- **Better clean sheet model**: The current blend of actual CS rates (70%) and Poisson xGA (30%) still slightly over-projects defenders and GKs. A model that accounts for squad changes (new signings, departures) affecting defensive quality would help.
-- **Fixture difficulty weighting**: The model treats all 38 PL matches equally. Early-round draft picks could be improved by weighting the first ~10 gameweeks more heavily (since waiver pickups can fix later problems).
-- **Multi-season FPL points variance**: The consistency metric currently uses raw gameweek points variance from FPL history. A better approach would decompose variance into "player skill variance" vs "matchup variance" to get a truer H2H floor estimate.
+- **Previous-season FPL points as a feature**: For players with FPL
+  gameweek history, their actual prior-season total is a strong predictor
+  and isn't currently used at all. Blending historical FPL points with the
+  xG-based projection could improve accuracy for established players.
+- **Better clean sheet model**: The current blend of actual CS rates (70%)
+  and Poisson xGA (30%) still slightly over-projects defenders and GKs. A
+  model that accounts for squad changes (new signings, departures) affecting
+  defensive quality would help.
+- **Fixture difficulty weighting**: The model treats all 38 PL matches
+  equally. Early-round draft picks could be improved by weighting the first
+  ~10 gameweeks more heavily (since waiver pickups can fix later problems).
+- **Multi-season FPL points variance**: The consistency metric currently
+  uses raw gameweek points variance from FPL history. A better approach
+  would decompose variance into "player skill variance" vs "matchup
+  variance" to get a truer H2H floor estimate.
 
 ### Lower impact
 
-- **Age-based decline curves**: Without birth dates in the DB, we can't model age decline. Adding birth dates would allow applying position-specific aging curves (forwards decline faster than defenders).
-- **Penalty taker identification**: Penalty goals are worth the same as open-play goals in FPL but are much more predictable. Identifying designated penalty takers and adding expected penalty goals would improve projections for those players.
-- **Backup GK detection**: Several GKs are projected as starters but are actually backups (scoring 0-13 actual points). Using squad hierarchy data or minutes trends to identify likely #2 keepers would reduce GK over-projections.
-- **Competition for minutes within a squad**: The model projects each player independently. Modelling competition (e.g. two strikers competing for one spot) would improve minutes projections for rotation-risk players.
+- **Age-based decline curves**: Without birth dates in the DB, we can't
+  model age decline. Adding birth dates would allow applying
+  position-specific aging curves (forwards decline faster than defenders).
+- **Penalty taker identification**: Penalty goals are worth the same as
+  open-play goals in FPL but are much more predictable. Identifying
+  designated penalty takers and adding expected penalty goals would improve
+  projections for those players.
+- **Backup GK detection**: Several GKs are projected as starters but are
+  actually backups (scoring 0-13 actual points). Using squad hierarchy data
+  or minutes trends to identify likely #2 keepers would reduce GK
+  over-projections.
+- **Competition for minutes within a squad**: The model projects each
+  player independently. Modelling competition (e.g. two strikers competing
+  for one spot) would improve minutes projections for rotation-risk
+  players.
