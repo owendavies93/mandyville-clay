@@ -154,9 +154,115 @@ Key impact: Salah 295→230 (actual 123), Haaland 213→198 (actual 232).
 
 The three recommended changes are complementary (they address different aspects: transfer handling, appearance points, and point conversion). They should be combined and re-tested on a merged branch.
 
+## Squad Selector Backtest: 2025 GW 1-8
+
+Classic FPL opening squad chosen by `cmd/squad` from `-backtest` projections,
+then scored against actual FPL points with a fixed XI, FPL automatic
+substitutions, and the captain re-picked every gameweek from the model's
+own per-gameweek projections (vice takes over on a blank).
+
+**Team assignment.** Rates come only from seasons before 2025. Each player
+is assigned the club they were at when the summer window closed, computed
+by `loadTeamCutoffDate` as `date_trunc('year', min(fixture_date)) + 8
+months` — **2025-09-01** for this season — then taking the `players_teams`
+row spanning that date. Summer transfers are therefore captured and January
+moves are not, so there is no lookahead. Prices are GW1 values from
+`fpl_players_gameweeks` (`fpl_season_info.starting_price` is only populated
+for 2026). The evaluation pool is built with the same cutoff logic and
+restricted to clubs with 2025 PL fixtures.
+
+| Squad | Points | Cost | Formation | Captain |
+|---|---|---|---|---|
+| **Projection model** | **431** | £100.0M | 4-5-1 | Salah |
+| Baseline: 2024 FPL points | 335 | £100.0M | 5-2-3 | Salah |
+| Hindsight optimum | 673 | £87.5M | 5-3-2 | Haaland |
+| Random valid squads (n=200) | 159 avg (43-311) | — | — | — |
+
+- **+96 pts vs the naive "last season's points" baseline** (+29%)
+- **+272 pts vs a random valid squad**
+- **64% of the hindsight optimum**
+- 53.9 pts/gameweek, in line with a competent real-world FPL manager
+- Per-gameweek: 76, 27, 60, 64, 54, 56, 32, 62
+
+### Accuracy of the selected XI
+
+The XI was projected at 368.9 points and scored 350 (**−5.1%**), so the
+window scaling and fixture adjustment are well calibrated in aggregate.
+Automatic substitutions added 45 points (Gudmundsson 24, Kroupi 21), and
+the captain added 36.
+
+| Player | Projected | Actual | Error |
+|---|---|---|---|
+| Erling Haaland | 44.8 | 83 | +38.2 |
+| Omar Alderete | 21.5 | 45 | +23.5 |
+| Joe Rodon | 19.0 | 31 | +12.0 |
+| David Raya | 31.4 | 40 | +8.6 |
+| Bruno Fernandes | 35.7 | 36 | +0.3 |
+| Bryan Mbeumo | 35.8 | 36 | +0.2 |
+| Tijjani Reijnders | 32.2 | 32 | −0.2 |
+| Luke O'Nien | 19.0 | 0 | −19.0 |
+| Jaka Bijol | 19.4 | 0 | −19.4 |
+| Mohamed Salah | 63.6 | 36 | −27.6 |
+| Cole Palmer | 46.5 | 11 | −35.5 |
+
+### Captaincy
+
+| Policy | Points |
+|---|---|
+| Fixed captain for the whole window | 431 |
+| Re-picked weekly from model projections | 431 (+0) |
+| Re-picked weekly with hindsight | 485 (+54) |
+
+Re-picking the captain each week using the model's own per-gameweek numbers
+changes **nothing**: the model rates Salah 6.9–9.0 per gameweek against
+Haaland's 4.8–6.1, a gap far wider than any fixture-difficulty swing, so
+Salah is chosen all eight weeks. The 54-point shortfall against a perfect
+captain is therefore entirely a projection-accuracy problem, not a
+captain-policy problem. Fixture adjustment is too weak a signal to overturn
+a mis-ranked player.
+
+### Where the points were lost
+
+1. **Budget enablers that lost their place (−38 pts)**: Bijol and O'Nien
+   were cheap £4.0M picks bought to free up money for the premium players
+   — both projected ~19 points and played zero minutes. With the backup
+   keeper, £12.0M of the squad returned nothing. The optimiser maximises
+   expected points with no penalty for rotation risk, so it gravitates to
+   cheap projected starters at newly promoted clubs, which is exactly where
+   minutes are least certain.
+2. **Premium midfield busts (−63 pts vs projection)**: Salah and Palmer
+   accounted for £25.0M (25% of budget) and returned 47 points between
+   them. Salah alone drove the captaincy shortfall above.
+
+The hindsight optimum spent only £87.5M, confirming that the budget is not
+the binding constraint — player selection is.
+
+### Reproducing
+
+```
+go run ./cmd/project/ -season 2025 -backtest -output out/proj_2025.json
+go run ./cmd/squad/ -input out/proj_2025.json -season 2025 -gameweeks 8 \
+    -json out/squad_2025_gw8.json
+python3 scratch/backtest_squad.py
+```
+
+The Python script needs `out/pool_2025.csv`, `out/gwpts_2025.csv` and
+`out/prior_2024.csv`; the `\copy` queries that build them are in the git
+history for this section.
+
 ## Todos
 
 ### High impact
+
+- **Rotation risk penalty in squad selection**: The squad optimiser treats a
+  cheap projected starter as risk-free. Discounting players whose projected
+  minutes rely on a single prior season, or who moved club in the summer,
+  would have avoided Bijol and O'Nien. A variance-aware objective (maximise
+  expected points minus k × minutes uncertainty) is the natural fix.
+- **Captaincy is bounded by projection quality**: weekly re-picking is
+  already implemented and gains nothing, because fixture adjustment cannot
+  overturn a mis-ranked player. The 54-point gap to a perfect captain closes
+  only by improving the underlying points model for premium attackers.
 
 - **FPL gameweek-level points model**: Rather than converting xG/xA to FPL points via the scoring rules, train a regression directly from historical per-90 stats to actual FPL gameweek points. This would implicitly learn the correct bonus/DEFCON/save relationships rather than modelling each component separately with hand-tuned calibrations.
 - **Position-specific minutes model**: Forwards average 66 min/app, midfielders 74, defenders 82, GKs 90. The current appearance points model uses a crude fullMatchFrac estimate. A position-aware model would improve this.
