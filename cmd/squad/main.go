@@ -40,9 +40,10 @@ type cPlayer struct {
 	proj      projection.PlayerProjection
 	price     float64
 	teamID    int    // team from the projection (players_teams table)
-	teamName  string // display name for teamID
-	adjPoints float64 // window-adjusted points (GW 1..N)
-	gw1Points float64 // GW1-only points (for captain selection)
+	teamName  string    // display name for teamID
+	adjPoints float64   // window-adjusted points (GW 1..N)
+	gw1Points float64   // GW1-only points (for captain selection)
+	gwPoints  []float64 // projected points per gameweek, index gw-1
 }
 
 func (p cPlayer) slot() int {
@@ -78,6 +79,7 @@ func main() {
 	budget := flag.Float64("budget", 100.0, "total budget in millions")
 	season := flag.Int("season", 2026, "season for prices and fixtures")
 	gameweeks := flag.Int("gameweeks", 6, "number of opening gameweeks to optimise for")
+	jsonOut := flag.String("json", "", "write the selected squad to this file as JSON")
 	configFile := flag.String("config", "", "path to mandyville config.yaml")
 	dbHost := flag.String("db-host", "", "database host")
 	dbPort := flag.Int("db-port", 0, "database port")
@@ -187,25 +189,36 @@ func main() {
 		tid := p.TeamID
 		tname := p.TeamName
 
+		fxs := fixturesByTeam[tid]
+		pos := toFPLPos(p.Position)
+		perMatch := p.ProjectedPoints / 38.0
+
 		// Window-adjusted points: average difficulty over the opening N
 		// gameweeks.
 		mult := 1.0
-		if fxs, ok := fixturesByTeam[tid]; ok && len(fxs) > 0 {
-			mult = projection.FixtureDifficultyMultiplier(fxs, strengths, toFPLPos(p.Position))
+		if len(fxs) > 0 {
+			mult = projection.FixtureDifficultyMultiplier(fxs, strengths, pos)
 		}
 
-		// GW1-only points: difficulty of just the first gameweek fixture.
-		gw1Mult := 1.0
-		if fxs, ok := fixturesByTeam[tid]; ok {
-			var gw1 []projection.TeamFixture
-			for _, fx := range fxs {
-				if fx.Gameweek == 1 {
-					gw1 = append(gw1, fx)
-				}
+		// Per-gameweek points, so the captain can be re-picked each week.
+		// A blank gameweek scores nothing; a double counts both fixtures.
+		byGW := map[int][]projection.TeamFixture{}
+		for _, fx := range fxs {
+			byGW[fx.Gameweek] = append(byGW[fx.Gameweek], fx)
+		}
+		gwPoints := make([]float64, *gameweeks)
+		for gw := 1; gw <= *gameweeks; gw++ {
+			if len(fxs) == 0 {
+				// No schedule available: assume one average fixture.
+				gwPoints[gw-1] = perMatch
+				continue
 			}
-			if len(gw1) > 0 {
-				gw1Mult = projection.FixtureDifficultyMultiplier(gw1, strengths, toFPLPos(p.Position))
+			f := byGW[gw]
+			if len(f) == 0 {
+				continue
 			}
+			m := projection.FixtureDifficultyMultiplier(f, strengths, pos)
+			gwPoints[gw-1] = perMatch * m * float64(len(f))
 		}
 
 		players = append(players, cPlayer{
@@ -214,7 +227,8 @@ func main() {
 			teamID:    tid,
 			teamName:  tname,
 			adjPoints: p.ProjectedPoints * scale * mult,
-			gw1Points: p.ProjectedPoints / 38.0 * gw1Mult,
+			gw1Points: gwPoints[0],
+			gwPoints:  gwPoints,
 		})
 	}
 
@@ -226,6 +240,13 @@ func main() {
 	squad := optimise(players, *budget)
 
 	printSquad(players, squad, *budget, *gameweeks)
+
+	if *jsonOut != "" {
+		if err := writeSquadJSON(*jsonOut, players, squad, *budget, *season, *gameweeks); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to write JSON: %v\n", err)
+			os.Exit(1)
+		}
+	}
 }
 
 // squad is a selected 15-man team.
@@ -526,6 +547,88 @@ func clubOK(s squad, players []cPlayer) bool {
 		}
 	}
 	return true
+}
+
+// squadJSONPlayer is one selected player in the JSON output.
+type squadJSONPlayer struct {
+	PlayerID  int     `json:"player_id"`
+	Name      string  `json:"name"`
+	Position  string  `json:"position"`
+	TeamID    int     `json:"team_id"`
+	TeamName  string  `json:"team"`
+	Price     float64 `json:"price"`
+	Projected float64   `json:"projected_window_points"`
+	GW1       float64   `json:"projected_gw1_points"`
+	ByGW      []float64 `json:"projected_by_gameweek"`
+	Captain   bool      `json:"captain"`
+}
+
+// squadJSON is the machine-readable form of a selected squad.
+type squadJSON struct {
+	Season          int               `json:"season"`
+	Gameweeks       int               `json:"gameweeks"`
+	Budget          float64           `json:"budget"`
+	Cost            float64           `json:"cost"`
+	Formation       string            `json:"formation"`
+	ProjectedPoints float64           `json:"projected_points"`
+	CaptainID       int               `json:"captain_player_id"`
+	XI              []squadJSONPlayer `json:"xi"`
+	Bench           []squadJSONPlayer `json:"bench"`
+}
+
+func writeSquadJSON(path string, players []cPlayer, s squad, budget float64, season, gameweeks int) error {
+	toJSON := func(i int) squadJSONPlayer {
+		p := players[i]
+		return squadJSONPlayer{
+			PlayerID:  p.proj.PlayerID,
+			Name:      fmt.Sprintf("%s %s", p.proj.FirstName, p.proj.LastName),
+			Position:  p.proj.Position,
+			TeamID:    p.teamID,
+			TeamName:  p.teamName,
+			Price:     p.price,
+			Projected: p.adjPoints,
+			GW1:       p.gw1Points,
+			ByGW:      p.gwPoints,
+			Captain:   i == s.captain,
+		}
+	}
+
+	defs, mids, fwds := 0, 0, 0
+	for _, i := range s.xi {
+		switch players[i].proj.Position {
+		case "DEF":
+			defs++
+		case "MID":
+			mids++
+		case "FWD":
+			fwds++
+		}
+	}
+
+	out := squadJSON{
+		Season:          season,
+		Gameweeks:       gameweeks,
+		Budget:          budget,
+		Cost:            s.cost(players),
+		Formation:       fmt.Sprintf("%d-%d-%d", defs, mids, fwds),
+		ProjectedPoints: s.score(players),
+		CaptainID:       players[s.captain].proj.PlayerID,
+	}
+	for _, i := range s.xi {
+		out.XI = append(out.XI, toJSON(i))
+	}
+	for _, i := range s.bench {
+		out.Bench = append(out.Bench, toJSON(i))
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
 }
 
 // printSquad renders the final squad.
