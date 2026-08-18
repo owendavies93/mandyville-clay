@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 
+	"github.com/mandyville/mandyville-draft/draft"
 	"github.com/mandyville/mandyville-draft/projection"
 )
 
@@ -15,6 +16,7 @@ func main() {
 	season := flag.Int("season", 2025, "season to backtest")
 	leagueSize := flag.Int("league-size", 8, "number of managers in draft league")
 	rolling := flag.Bool("rolling", false, "run the rolling in-season backtest")
+	grade := flag.Bool("grade-recommendations", false, "grade logged transfer recommendations against actual points")
 	configFile := flag.String("config", "", "path to mandyville config.yaml")
 	dbHost := flag.String("db-host", "", "database host")
 	dbPort := flag.Int("db-port", 0, "database port")
@@ -64,6 +66,11 @@ func main() {
 	if err := db.Ping(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to connect to database: %v\n", err)
 		os.Exit(1)
+	}
+
+	if *grade {
+		gradeRecommendations(db)
+		return
 	}
 
 	if *rolling {
@@ -350,6 +357,136 @@ func runRollingBacktest(db *sql.DB, season, leagueSize int) {
 		}
 		fmt.Println()
 	}
+}
+
+// gradeRecommendations scores every logged transfer recommendation against
+// actual points over the horizon it claimed, answering "would the swap have
+// beaten holding?". Free-agent and waiver rows are graded separately.
+func gradeRecommendations(db *sql.DB) {
+	runs, err := draft.LoadRecommendationRuns(db)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to load recommendations: %v\n", err)
+		os.Exit(1)
+	}
+	if len(runs) == 0 {
+		fmt.Println("No logged recommendation runs.")
+		return
+	}
+
+	actualCache := map[int]map[int]map[int]int{}
+	getActual := func(season int) map[int]map[int]int {
+		if a, ok := actualCache[season]; ok {
+			return a
+		}
+		a, err := projection.LoadActualGWPoints(db, season)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to load actual points for %d: %v\n", season, err)
+			os.Exit(1)
+		}
+		actualCache[season] = a
+		return a
+	}
+
+	type agg struct {
+		n                             int
+		sumExp, sumAct, sumAbs, sumSq float64
+		hits                          int
+		sumProb                       float64
+		nProb                         int
+	}
+	byKind := map[string]*agg{}
+
+	var totalCands int
+	for _, r := range runs {
+		actual := getActual(r.Season)
+		for _, c := range r.Candidates {
+			if !c.Recommended {
+				continue
+			}
+			in := sumActualWindow(actual, c.PlayerInID, r.Event, r.Horizon)
+			out := sumActualWindow(actual, c.PlayerOutID, r.Event, r.Horizon)
+			actGain := float64(in - out)
+			err := c.ExpectedGain - actGain
+
+			a := byKind[c.Kind]
+			if a == nil {
+				a = &agg{}
+				byKind[c.Kind] = a
+			}
+			a.n++
+			a.sumExp += c.ExpectedGain
+			a.sumAct += actGain
+			a.sumAbs += math.Abs(err)
+			a.sumSq += err * err
+			if actGain > 0 {
+				a.hits++
+			}
+			if c.SuccessProbability != nil {
+				a.sumProb += *c.SuccessProbability
+				a.nProb++
+			}
+			totalCands++
+		}
+	}
+
+	fmt.Printf("Recommendation grading: %d runs, %d candidates\n\n", len(runs), totalCands)
+	fmt.Printf("%-12s %5s %9s %9s %7s %7s %7s %8s\n",
+		"Kind", "n", "ExpGain", "ActGain", "MAE", "RMSE", "Hit%", "MeanProb")
+	fmt.Println("------------ ----- --------- --------- ------- ------- ------- --------")
+	for _, kind := range []string{"free-agent", "waiver"} {
+		a := byKind[kind]
+		if a == nil || a.n == 0 {
+			continue
+		}
+		meanExp := a.sumExp / float64(a.n)
+		meanAct := a.sumAct / float64(a.n)
+		mae := a.sumAbs / float64(a.n)
+		rmse := math.Sqrt(a.sumSq / float64(a.n))
+		hit := 100 * float64(a.hits) / float64(a.n)
+		meanProb := "-"
+		if a.nProb > 0 {
+			meanProb = fmt.Sprintf("%.2f", a.sumProb/float64(a.nProb))
+		}
+		fmt.Printf("%-12s %5d %9.2f %9.2f %7.2f %7.2f %6.0f%% %8s\n",
+			kind, a.n, meanExp, meanAct, mae, rmse, hit, meanProb)
+	}
+
+	// Per-run summary.
+	fmt.Printf("\n%-6s %-10s %-6s %-5s %8s %8s %8s\n",
+		"Run", "Date", "Event", "Horiz", "Cands", "ExpGain", "ActGain")
+	for _, r := range runs {
+		actual := getActual(r.Season)
+		var exp, act float64
+		n := 0
+		for _, c := range r.Candidates {
+			if !c.Recommended {
+				continue
+			}
+			in := sumActualWindow(actual, c.PlayerInID, r.Event, r.Horizon)
+			out := sumActualWindow(actual, c.PlayerOutID, r.Event, r.Horizon)
+			exp += c.ExpectedGain
+			act += float64(in - out)
+			n++
+		}
+		if n == 0 {
+			continue
+		}
+		fmt.Printf("%-6d %-10s %-6d %-5d %8d %8.2f %8.2f\n",
+			r.ID, r.RunTime.Format("2006-01-02"), r.Event, r.Horizon, n, exp/float64(n), act/float64(n))
+	}
+}
+
+// sumActualWindow sums a player's actual FPL points over a gameweek window.
+func sumActualWindow(actual map[int]map[int]int, playerID, startGW, horizon int) int {
+	gwMap := actual[playerID]
+	if gwMap == nil {
+		return 0
+	}
+	total := 0
+	for gw := startGW; gw < startGW+horizon; gw++ {
+		total += gwMap[gw]
+	}
+	return total
 }
 
 // --- metrics helpers ---

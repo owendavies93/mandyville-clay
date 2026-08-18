@@ -3,8 +3,10 @@
 ## Project Structure
 
 - `projection/` — Core projection engine: `engine.go` (pipeline, scoring rules, in-season blending), `loader.go` (DB queries), `models.go` (types), `db.go` (connection), `fixtures.go` (fixture-difficulty adjustment), `persist.go` (projection-run snapshots), `engine_test.go`
+- `draft/` — Draft league state loaders and recommendation logic: `models.go` (types), `load.go` (DB queries), `xi.go` (starting-XI optimiser + marginal swap value), `recommend.go` (candidate generation + waiver simulation), `persist.go` (recommendation logging), `draft_test.go`
 - `cmd/project/` — CLI to generate projections (pre-season or in-season) and optionally persist them
-- `cmd/backtest/` — CLI for season-level and rolling in-season backtests
+- `cmd/backtest/` — CLI for season-level and rolling in-season backtests, plus `-grade-recommendations` to score logged transfer advice
+- `cmd/transfers/` — CLI to recommend draft transfers, waiver claims and the starting XI
 - `cmd/draft/` — Bubble Tea TUI for live draft management
 - `cmd/squad/` — CLI to select the optimal Classic FPL opening squad within budget
 - `PERFORMANCE.md` — Backtest results, experiment history, improvement roadmap
@@ -14,6 +16,7 @@
 PostgreSQL `mandyville` on `localhost:5432` (user: `postgres`, pass: `password`). Key tables: `players_fixtures`, `fixtures_team_performance`, `fpl_players_gameweeks`, `fpl_season_info`, `players_teams`. English PL `competition_id = 190`. Season convention: the season refers to the starting year of the season for leagues that span multiple calendar years, so 2025 refers to the 2025-2026 season.
 - `players_teams` is the single source of truth for player→team mapping (date-ranged `start_date`/`end_date`). All team assignment goes through `LoadPlayerTeams`, never `fpl_season_info` or fixture data.
 - FPL Draft game state lives in the `fpl_draft_*` tables (leagues, entries, picks, transactions, ownership, matches, standings, waiver order, entry lineups, sync runs) plus `fpl_player_availability`, and `fpl_season_info.fpl_draft_id` maps players to their draft-game element id. These are written by the `update-fpl-draft` / `update-fpl-availability` crons in the `data` repo; ownership, waiver order and availability are change-only date/time ranges (`end_time IS NULL` marks the open row).
+- `fpl_draft_recommendation_runs` / `fpl_draft_recommendations` log what `cmd/transfers` advised (both the free-agent and waiver views) for later grading. They are written by `cmd/transfers` with the write database user.
 
 ## Development
 

@@ -33,9 +33,41 @@ Flags:
 ```
 go run ./cmd/backtest/ -season 2025           # pre-season projection vs actuals
 go run ./cmd/backtest/ -season 2025 -rolling  # rolling in-season backtest
+go run ./cmd/backtest/ -grade-recommendations # score logged transfer advice
 ```
 
-Flags: `-season` (default 2025), `-rolling`, `-league-size`, `-config`, `-db-*`.
+Flags: `-season` (default 2025), `-rolling`, `-grade-recommendations`, `-league-size`, `-config`, `-db-*`.
+
+## Draft Transfers
+
+```
+go run ./cmd/transfers/ -league 12345 -season 2026
+```
+
+Recommends same-position transfers, waiver claims and the starting XI for
+the upcoming gameweek, from the league state in the `fpl_draft_*` tables
+plus fixture-level projections (computed in-process, draft scoring rules).
+Every swap is valued by its marginal effect on the optimised starting XI
+over the horizon, not the raw player-points delta.
+
+Flags:
+
+| Flag | Default | Description |
+|---|---|---|
+| `-league` | — | FPL draft league id (required) |
+| `-season` | 2026 | Season |
+| `-horizon` | 3 | Gameweeks to project ahead |
+| `-discount` | 0.9 | Geometric per-gameweek discount |
+| `-top` | 10 | Number of candidates to show |
+| `-min-gain` | 1.0 | Minimum discounted XI gain to recommend a swap |
+| `-json` | — | Write the full candidate set to a JSON file |
+| `-input` | — | Reuse a `projections.json` instead of computing in-process |
+| `-no-log` | false | Skip writing recommendations to the database |
+| `-config`, `-db-*` | — | Database connection (same as `cmd/project`) |
+
+Recommendations are logged to `fpl_draft_recommendation_runs`/
+`fpl_draft_recommendations` (unless `-no-log`) so `cmd/backtest
+-grade-recommendations` can later score them against actual points.
 
 ## Draft TUI
 
