@@ -12,7 +12,22 @@ import (
 func main() {
 	input := flag.String("input", "projections.json", "projection JSON file")
 	sessionFlag := flag.String("session", "", "session ID to resume")
+	reconcileFlag := flag.String("reconcile", "", "draft result JSON to reconcile against FPL API")
+	leagueFlag := flag.Int("league", 0, "FPL Draft league ID (required for -reconcile)")
+	applyFlag := flag.Bool("apply", false, "apply corrections from -reconcile to the result file")
 	flag.Parse()
+
+	if *reconcileFlag != "" {
+		if *leagueFlag == 0 {
+			fmt.Fprintf(os.Stderr, "-league is required with -reconcile\n")
+			os.Exit(1)
+		}
+		if err := runReconcile(*reconcileFlag, *leagueFlag, *applyFlag); err != nil {
+			fmt.Fprintf(os.Stderr, "reconcile failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	f, err := os.Open(*input)
 	if err != nil {
