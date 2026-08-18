@@ -12,6 +12,7 @@
 
 PostgreSQL `mandyville` on `localhost:5432` (user: `postgres`, pass: `password`). Key tables: `players_fixtures`, `fixtures_team_performance`, `fpl_players_gameweeks`, `fpl_season_info`, `players_teams`. English PL `competition_id = 190`. Season convention: the season refers to the starting year of the season for leagues that span multiple calendar years, so 2025 refers to the 2025-2026 season.
 - `players_teams` is the single source of truth for player→team mapping (date-ranged `start_date`/`end_date`). All team assignment goes through `LoadPlayerTeams`, never `fpl_season_info` or fixture data.
+- FPL Draft game state lives in the `fpl_draft_*` tables (leagues, entries, picks, transactions, ownership, matches, standings, waiver order, entry lineups, sync runs) plus `fpl_player_availability`, and `fpl_season_info.fpl_draft_id` maps players to their draft-game element id. These are written by the `update-fpl-draft` / `update-fpl-availability` crons in the `data` repo; ownership, waiver order and availability are change-only date/time ranges (`end_time IS NULL` marks the open row).
 
 ## Development
 
