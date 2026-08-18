@@ -549,50 +549,6 @@ func printWaiverClaims(title string, cands []draft.Candidate, startGW int) {
 	fmt.Println()
 }
 
-// printUnmatched warns about elements and players the recommender cannot
-// evaluate, so a good free agent is never silently invisible.
-func printUnmatched(db *sql.DB, season int, unmatchedFree, myUnmatched, unprojectedFree []draft.Ownership) {
-	if len(unmatchedFree) == 0 && len(myUnmatched) == 0 && len(unprojectedFree) == 0 {
-		return
-	}
-
-	fmt.Println("Cannot evaluate (check manually):")
-
-	if len(myUnmatched) > 0 {
-		var elems []int
-		for _, o := range myUnmatched {
-			elems = append(elems, o.Element)
-		}
-		fmt.Printf("  You own %d unmatched element(s): %v\n", len(myUnmatched), elems)
-	}
-
-	if len(unmatchedFree) > 0 {
-		var elems []int
-		for _, o := range unmatchedFree {
-			elems = append(elems, o.Element)
-		}
-		avail, err := draft.LoadElementAvailability(db, season, elems)
-		if err != nil {
-			fmt.Printf("  %d free agent(s) unmatched to a player: %v\n", len(unmatchedFree), elems)
-		} else {
-			fmt.Printf("  %d free agent(s) unmatched to a player:\n", len(unmatchedFree))
-			for _, o := range unmatchedFree {
-				a := avail[o.Element]
-				fmt.Printf("    element %d  status=%s  draft_rank=%d  %s\n",
-					o.Element, a.Status, a.DraftRank, a.News)
-			}
-		}
-	}
-
-	if len(unprojectedFree) > 0 {
-		fmt.Printf("  %d free agent(s) have no projection (missing fpl_season_info?):\n", len(unprojectedFree))
-		for _, o := range unprojectedFree {
-			fmt.Printf("    player %d (element %d)\n", o.PlayerID, o.Element)
-		}
-	}
-	fmt.Println()
-}
-
 // printLineupDiff compares the lineup last synced from the API against the
 // recommended XI, flagging players the API lineup benches or starts
 // differently.
