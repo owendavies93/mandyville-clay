@@ -1,6 +1,7 @@
 *.json
 scratch/
 /draft
+!/draft/
 meta/
 evaluate.py
 meta
