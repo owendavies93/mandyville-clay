@@ -22,12 +22,20 @@ Flags:
 | `-season` | 2026 | Target season |
 | `-league-size` | 8 | Number of managers |
 | `-output` | projections.json | Output file |
-| `-backtest` | false | Compare against actual FPL points |
-| `-db-host` | localhost | Database host |
-| `-db-port` | 5432 | Database port |
-| `-db-user` | postgres | Database user |
-| `-db-pass` | password | Database password |
-| `-db-name` | mandyville | Database name |
+| `-rules` | classic | Scoring rules: `classic` or `draft` |
+| `-as-of-gameweek` | 0 | Project from this gameweek onward using in-season data (0 = pre-season) |
+| `-persist` | false | Save the run to `fpl_projection_runs`/`fpl_projections` |
+| `-config` | — | Path to a mandyville `config.yaml` |
+| `-db-*` | — | Database connection overrides |
+
+## Backtests
+
+```
+go run ./cmd/backtest/ -season 2025           # pre-season projection vs actuals
+go run ./cmd/backtest/ -season 2025 -rolling  # rolling in-season backtest
+```
+
+Flags: `-season` (default 2025), `-rolling`, `-league-size`, `-config`, `-db-*`.
 
 ## Draft TUI
 
@@ -57,8 +65,10 @@ Flags:
 2. **Bayesian regression** — Player rates are pulled toward positional means using 1800 regression minutes.
 3. **Team context** — Attacking rates scaled by `√(team_xG / league_avg_xG)`. Player→team mapping comes from the `players_teams` table (current club for upcoming seasons; team at the summer-window close for backtests).
 4. **Minutes projection** — Weighted average of recent seasons with a trend floor at 85% of the most recent season. Transfers from non-PL leagues get competition-tier discounts (Top 7 European leagues: 0.80×, Championship: 0.65×, other: 0.50×) and a minutes floor (1800–2200) when identified as new-to-PL signings.
-5. **Points conversion** — A 60/40 blend of a manual component model (goals, assists, clean sheets, saves, bonus, cards, DEFCON, goals conceded penalty) and a per-position linear regression trained on historical per-90 stats vs actual FPL points.
-6. **VORP** — Projected points minus the replacement-level player at each position (the N+1th ranked player where N = league_size × roster slots).
-7. **H2H adjustment** — Penalises inconsistent players: `H2H = projected_points − 2 × stddev(historic_gw_points)`.
+5. **Fixture-level scoring** — The season total is the sum of per-fixture projections. Each fixture gets opponent difficulty multipliers (attacking vs defensive) and availability-adjusted expected minutes, so blanks, doubles and injuries fall out naturally.
+6. **Points conversion** — Per fixture, a 60/40 blend of a manual component model (goals, assists, clean sheets, saves, bonus, cards, DEFCON, goals conceded penalty) and a per-position linear regression trained on historical per-90 stats vs actual FPL points. Scoring is parameterised (`classic` vs `draft` rules — draft gives GKs 10 points per goal).
+7. **In-season updating** — `-as-of-gameweek N` blends current-season form into the pre-season prior with sample-size shrinkage (per-90 rates shrink with current-season minutes, team strengths with matches played), and applies the current injury/suspension status.
+8. **VORP** — Projected points minus the replacement-level player at each position (the N+1th ranked player where N = league_size × roster slots).
+9. **H2H adjustment** — Penalises inconsistent players: `H2H = projected_points − 2 × stddev(historic_gw_points)`.
 
 See [PERFORMANCE.md](PERFORMANCE.md) for full backtest results and improvement roadmap.

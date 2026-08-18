@@ -39,7 +39,7 @@ var formations = []formation{
 type cPlayer struct {
 	proj      projection.PlayerProjection
 	price     float64
-	teamID    int    // team from the projection (players_teams table)
+	teamID    int       // team from the projection (players_teams table)
 	teamName  string    // display name for teamID
 	adjPoints float64   // window-adjusted points (GW 1..N)
 	gw1Points float64   // GW1-only points (for captain selection)
@@ -58,20 +58,6 @@ func (p cPlayer) slot() int {
 		return slotFWD
 	}
 	return -1
-}
-
-func toFPLPos(s string) projection.FPLPosition {
-	switch s {
-	case "GK":
-		return projection.Goalkeeper
-	case "DEF":
-		return projection.Defender
-	case "MID":
-		return projection.Midfielder
-	case "FWD":
-		return projection.Forward
-	}
-	return projection.Goalkeeper
 }
 
 func main() {
@@ -160,24 +146,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load fixtures and team strengths for fixture-difficulty adjustment.
-	fixturesByTeam, err := projection.LoadFixturesByGameweek(db, *season, *gameweeks)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to load fixtures: %v\n", err)
-		os.Exit(1)
-	}
-	if len(fixturesByTeam) == 0 {
-		fmt.Fprintf(os.Stderr, "warning: no fixture schedule found for season %d; using flat gameweek scaling\n", *season)
-	}
-
-	strengths, err := projection.LoadTeamStrengths(db, *season)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to load team strengths: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Build the playable list: players with a known price.
-	scale := float64(*gameweeks) / 38.0
+	// Build the playable list: players with a known price. Per-gameweek
+	// points come straight from the engine's fixture-level projections, so
+	// blanks, doubles and fixture difficulty are already accounted for.
 	var players []cPlayer
 	for _, p := range data.Players {
 		pp, ok := prices[p.PlayerID]
@@ -185,48 +156,23 @@ func main() {
 			continue
 		}
 
-		// Team comes from the projection (players_teams table).
-		tid := p.TeamID
-		tname := p.TeamName
-
-		fxs := fixturesByTeam[tid]
-		pos := toFPLPos(p.Position)
-		perMatch := p.ProjectedPoints / 38.0
-
-		// Window-adjusted points: average difficulty over the opening N
-		// gameweeks.
-		mult := 1.0
-		if len(fxs) > 0 {
-			mult = projection.FixtureDifficultyMultiplier(fxs, strengths, pos)
-		}
-
-		// Per-gameweek points, so the captain can be re-picked each week.
-		// A blank gameweek scores nothing; a double counts both fixtures.
-		byGW := map[int][]projection.TeamFixture{}
-		for _, fx := range fxs {
-			byGW[fx.Gameweek] = append(byGW[fx.Gameweek], fx)
-		}
 		gwPoints := make([]float64, *gameweeks)
-		for gw := 1; gw <= *gameweeks; gw++ {
-			if len(fxs) == 0 {
-				// No schedule available: assume one average fixture.
-				gwPoints[gw-1] = perMatch
-				continue
+		var adjPoints float64
+		for _, fx := range p.Gameweeks {
+			if fx.Gameweek >= 1 && fx.Gameweek <= *gameweeks {
+				gwPoints[fx.Gameweek-1] += fx.ProjectedPoints
 			}
-			f := byGW[gw]
-			if len(f) == 0 {
-				continue
-			}
-			m := projection.FixtureDifficultyMultiplier(f, strengths, pos)
-			gwPoints[gw-1] = perMatch * m * float64(len(f))
+		}
+		for _, pts := range gwPoints {
+			adjPoints += pts
 		}
 
 		players = append(players, cPlayer{
 			proj:      p,
 			price:     pp.Price,
-			teamID:    tid,
-			teamName:  tname,
-			adjPoints: p.ProjectedPoints * scale * mult,
+			teamID:    p.TeamID,
+			teamName:  p.TeamName,
+			adjPoints: adjPoints,
 			gw1Points: gwPoints[0],
 			gwPoints:  gwPoints,
 		})
@@ -551,12 +497,12 @@ func clubOK(s squad, players []cPlayer) bool {
 
 // squadJSONPlayer is one selected player in the JSON output.
 type squadJSONPlayer struct {
-	PlayerID  int     `json:"player_id"`
-	Name      string  `json:"name"`
-	Position  string  `json:"position"`
-	TeamID    int     `json:"team_id"`
-	TeamName  string  `json:"team"`
-	Price     float64 `json:"price"`
+	PlayerID  int       `json:"player_id"`
+	Name      string    `json:"name"`
+	Position  string    `json:"position"`
+	TeamID    int       `json:"team_id"`
+	TeamName  string    `json:"team"`
+	Price     float64   `json:"price"`
 	Projected float64   `json:"projected_window_points"`
 	GW1       float64   `json:"projected_gw1_points"`
 	ByGW      []float64 `json:"projected_by_gameweek"`

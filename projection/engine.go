@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 )
 
 const (
@@ -33,6 +34,23 @@ const (
 	defconProbMid = 0.08 // other midfielders
 	defconProbFwd = 0.05 // forwards (very rare)
 	defconProbGK  = 0.10 // goalkeepers
+
+	// In-season Bayesian blending.
+	// Current-season per-90 rates get weight m/(m+k) where m is
+	// current-season minutes and k is the shrinkage constant below.
+	rateShrinkageMinutes = 900.0
+
+	// Current-season minutes per fixture get weight n/(n+K) where n is
+	// the number of current-season appearances.
+	minutesShrinkageAppearances = 5.0
+
+	// Team strengths blend current-season form with the prior using the
+	// same scheme, keyed on current-season matches played.
+	teamShrinkageMatches = 10.0
+
+	// EngineVersion is recorded against persisted projection runs so old
+	// snapshots can be traced back to the model that produced them.
+	EngineVersion = "2.0-fixture-level"
 )
 
 var seasonWeights = []float64{seasonWeight0, seasonWeight1}
@@ -42,6 +60,7 @@ type Engine struct {
 	DB            *sql.DB
 	TargetSeason  int
 	LeagueSize    int
+	Rules         ScoringRules
 	TeamStrengths map[int]*TeamStrength
 	PositionNames map[int]string
 	CompTiers     map[int]CompetitionTier
@@ -49,6 +68,16 @@ type Engine struct {
 
 	// If true, build player pool from fixture data instead of fpl_season_info.
 	Backtest bool
+
+	// AsOfGameweek > 0 means the engine projects the remaining fixtures
+	// from that gameweek onward, blending current-season data observed
+	// before that gameweek's deadline. 0 means a pre-season projection.
+	AsOfGameweek int
+
+	// Internal state populated per run.
+	fixturesByTeam map[int][]TeamFixture
+	availability   map[int]Availability
+	prior          map[int]PriorRates
 
 	// Positional mean rates (computed from the player pool).
 	posMeanXGPer90  map[FPLPosition]float64
@@ -65,46 +94,135 @@ func NewEngine(db *sql.DB, targetSeason int, leagueSize int) *Engine {
 		DB:           db,
 		TargetSeason: targetSeason,
 		LeagueSize:   leagueSize,
+		Rules:        ClassicRules,
 	}
 }
 
-// Run executes the full projection pipeline and returns ranked output.
+// Run executes a pre-season projection: prior-season data only, projected
+// over the full 38-gameweek schedule.
 func (e *Engine) Run() (*ProjectionOutput, error) {
-	// 1. Load team strengths.
+	players, err := e.loadPrior()
+	if err != nil {
+		return nil, err
+	}
+
+	e.fixturesByTeam, err = LoadFixturesWindow(e.DB, e.TargetSeason, 1, 38)
+	if err != nil {
+		return nil, fmt.Errorf("loading fixtures: %w", err)
+	}
+
+	playerIDs := make([]int, len(players))
+	for i := range players {
+		playerIDs[i] = players[i].ID
+	}
+	// Availability is best-effort: the cron may not have run yet, or the
+	// season may predate availability capture.
+	e.availability, _ = LoadPlayerAvailability(e.DB, e.TargetSeason, playerIDs)
+
+	e.prior = make(map[int]PriorRates, len(players))
+	projections := make([]PlayerProjection, 0, len(players))
+	for i := range players {
+		p := &players[i]
+		in := e.priorInputs(p)
+		e.prior[p.ID] = in
+		projections = append(projections, e.projectPlayer(p, in))
+	}
+
+	return e.finalize(projections), nil
+}
+
+// PriorRates returns the per-player pre-season prior rates computed during
+// the last run, keyed by player ID. Only populated by Run (pre-season).
+func (e *Engine) PriorRates() map[int]PriorRates {
+	return e.prior
+}
+
+// RunInSeason projects the remaining fixtures from asOfGW onward, blending
+// current-season observations (before asOfGW's deadline) into the pre-season
+// prior.
+func (e *Engine) RunInSeason(asOfGW int) (*ProjectionOutput, error) {
+	if asOfGW < 1 {
+		asOfGW = 1
+	}
+	e.AsOfGameweek = asOfGW
+
+	players, err := e.loadPrior()
+	if err != nil {
+		return nil, err
+	}
+
+	deadlines, err := LoadGameweekDeadlines(e.DB, e.TargetSeason)
+	if err != nil {
+		return nil, fmt.Errorf("loading gameweek deadlines: %w", err)
+	}
+	deadline, ok := deadlines[asOfGW]
+	if !ok {
+		return nil, fmt.Errorf("no deadline for gameweek %d in season %d", asOfGW, e.TargetSeason)
+	}
+	beforeDate := deadline.Format("2006-01-02")
+
+	playerIDs := make([]int, len(players))
+	for i := range players {
+		playerIDs[i] = players[i].ID
+	}
+
+	curFixtures, err := LoadPlayerFixturesForSeasonUpTo(e.DB, playerIDs, e.TargetSeason, beforeDate)
+	if err != nil {
+		return nil, err
+	}
+	curGWs, err := LoadFPLGameweeksForSeasonUpTo(e.DB, playerIDs, e.TargetSeason, asOfGW)
+	if err != nil {
+		return nil, err
+	}
+	curTeam, err := LoadCurrentTeamStrengths(e.DB, e.TargetSeason, beforeDate)
+	if err != nil {
+		return nil, err
+	}
+	e.TeamStrengths = blendTeamStrengths(e.TeamStrengths, curTeam)
+	e.computeLeagueAvgOff()
+
+	observed := buildObservedStats(players, curFixtures, curGWs)
+	e.availability, _ = LoadPlayerAvailability(e.DB, e.TargetSeason, playerIDs)
+
+	e.fixturesByTeam, err = LoadFixturesWindow(e.DB, e.TargetSeason, asOfGW, 38)
+	if err != nil {
+		return nil, fmt.Errorf("loading remaining fixtures: %w", err)
+	}
+
+	projections := make([]PlayerProjection, 0, len(players))
+	for i := range players {
+		p := &players[i]
+		in := blendInputs(e.priorInputs(p), observed[p.ID], p.Position)
+		projections = append(projections, e.projectPlayer(p, in))
+	}
+
+	return e.finalize(projections), nil
+}
+
+// loadPrior loads the pre-season state shared by Run and RunInSeason:
+// team strengths, position metadata, the player pool and prior-season
+// rates.
+func (e *Engine) loadPrior() ([]Player, error) {
 	var err error
 	e.TeamStrengths, err = LoadTeamStrengths(e.DB, e.TargetSeason)
 	if err != nil {
 		return nil, fmt.Errorf("loading team strengths: %w", err)
 	}
+	e.computeLeagueAvgOff()
 
-	// Compute league average offensive rating.
-	var totalOff float64
-	var teamCount int
-	for _, ts := range e.TeamStrengths {
-		totalOff += ts.OffensiveRating
-		teamCount++
-	}
-	if teamCount > 0 {
-		e.leagueAvgOffRating = totalOff / float64(teamCount)
-	}
-
-	// 2. Load position names, competition tiers, and actual CS rates.
 	e.PositionNames, err = LoadPositionNames(e.DB)
 	if err != nil {
 		return nil, fmt.Errorf("loading positions: %w", err)
 	}
-
 	e.CompTiers, err = LoadCompetitionTiers(e.DB)
 	if err != nil {
 		return nil, fmt.Errorf("loading competition tiers: %w", err)
 	}
-
 	e.ActualCSRates, err = LoadActualCSRates(e.DB, e.TargetSeason)
 	if err != nil {
-		return nil, fmt.Errorf("loading positions: %w", err)
+		return nil, fmt.Errorf("loading CS rates: %w", err)
 	}
 
-	// 3. Load active players (try active flag first, fall back to all).
 	players, err := LoadActivePlayers(e.DB, e.TargetSeason)
 	if err != nil || len(players) == 0 {
 		players, err = LoadAllFPLPlayers(e.DB, e.TargetSeason)
@@ -112,36 +230,28 @@ func (e *Engine) Run() (*ProjectionOutput, error) {
 			return nil, fmt.Errorf("loading players: %w", err)
 		}
 	}
-
 	if len(players) == 0 {
 		return nil, fmt.Errorf("no players found for season %d", e.TargetSeason)
 	}
 
-	// 4. Get player IDs for batch loading.
 	playerIDs := make([]int, len(players))
 	for i, p := range players {
 		playerIDs[i] = p.ID
 	}
 
-	// 5. Load player fixtures (historical match data).
 	fixtures, err := LoadPlayerFixtures(e.DB, playerIDs, e.TargetSeason)
 	if err != nil {
 		return nil, fmt.Errorf("loading fixtures: %w", err)
 	}
-
-	// 6. Load FPL gameweek history.
 	fplGWs, err := LoadFPLGameweeks(e.DB, playerIDs, e.TargetSeason)
 	if err != nil {
 		return nil, fmt.Errorf("loading FPL gameweeks: %w", err)
 	}
-
-	// 7. Load player teams.
 	playerTeams, err := LoadPlayerTeams(e.DB, playerIDs, e.TargetSeason, e.Backtest)
 	if err != nil {
 		return nil, fmt.Errorf("loading player teams: %w", err)
 	}
 
-	// 8. Compute per-90 rates for each player and enrich.
 	for i := range players {
 		p := &players[i]
 		if team, ok := playerTeams[p.ID]; ok {
@@ -153,37 +263,483 @@ func (e *Engine) Run() (*ProjectionOutput, error) {
 		e.enrichFPLHistory(p, fplGWs[p.ID])
 	}
 
-	// 9. Compute positional mean rates for regression.
 	e.computePositionalMeans(players, fixtures)
+	return players, nil
+}
 
-	// 10. Project each player.
-	projections := make([]PlayerProjection, 0, len(players))
-	for i := range players {
-		proj := e.projectPlayer(&players[i])
-		projections = append(projections, proj)
+// computeLeagueAvgOff recomputes the league-average offensive rating used
+// for the team-context adjustment.
+func (e *Engine) computeLeagueAvgOff() {
+	var totalOff float64
+	var teamCount int
+	for _, ts := range e.TeamStrengths {
+		totalOff += ts.OffensiveRating
+		teamCount++
 	}
+	if teamCount > 0 {
+		e.leagueAvgOffRating = totalOff / float64(teamCount)
+	} else {
+		e.leagueAvgOffRating = 0
+	}
+}
 
-	// 11. Sort by projected points descending.
+// finalize sorts, computes VORP and H2H adjustment, and wraps the output.
+func (e *Engine) finalize(projections []PlayerProjection) *ProjectionOutput {
 	sort.Slice(projections, func(i, j int) bool {
 		return projections[i].ProjectedPoints > projections[j].ProjectedPoints
 	})
-
-	// 12. Compute VORP.
 	e.computeVORP(projections)
-
-	// 13. Compute H2H adjusted scores.
 	e.computeH2HAdjusted(projections)
-
-	// 14. Re-sort by VORP.
 	sort.Slice(projections, func(i, j int) bool {
 		return projections[i].VORP > projections[j].VORP
 	})
 
 	return &ProjectionOutput{
-		Season:     e.TargetSeason,
-		LeagueSize: e.LeagueSize,
-		Players:    projections,
-	}, nil
+		Season:       e.TargetSeason,
+		LeagueSize:   e.LeagueSize,
+		AsOfGameweek: e.AsOfGameweek,
+		Players:      projections,
+	}
+}
+
+// PriorRates is the set of per-90 / per-match quantities fed into the
+// fixture projection. Prior and posterior (blended) inputs share this shape.
+type PriorRates struct {
+	XGPer90           float64 `json:"xg_per_90"`
+	XAPer90           float64 `json:"xa_per_90"`
+	YellowsPer90      float64 `json:"yellows_per_90"`
+	RedsPer90         float64 `json:"reds_per_90"`
+	BonusPerMatch     float64 `json:"bonus_per_match"`
+	MinutesPerFixture float64 `json:"minutes_per_fixture"`
+}
+
+// projRates is the fully-resolved per-player rate set used to project a
+// single fixture.
+type projRates struct {
+	XGPer90             float64
+	XAPer90             float64
+	YellowsPer90        float64
+	RedsPer90           float64
+	FPLPer90            float64 // regression per-90 points
+	BonusPerMatch       float64
+	CSProb              float64
+	DefconProb          float64
+	GCMatch             float64
+	SavesPerMatch       float64
+	AvgAppearancePoints float64
+	MinutesPerFixture   float64
+}
+
+// fixtureCounts holds the raw (non-points) per-fixture projections used to
+// accumulate season-total component counts.
+type fixtureCounts struct {
+	Goals, Assists, CleanSheets, Bonus, Yellows, Reds, Defcon float64
+}
+
+// observedStats aggregates a player's current-season PL data up to the
+// as-of cutoff.
+type observedStats struct {
+	Minutes  int
+	Fixtures int // rows in players_fixtures, including zero-minute bench rows
+	XG       float64
+	XA       float64
+	Yellows  int
+	Reds     int
+	BPS      int
+	HasXG    bool
+}
+
+// priorInputs derives the pre-season rate set for a player: regressed,
+// team-adjusted per-90 rates plus projected minutes.
+func (e *Engine) priorInputs(p *Player) PriorRates {
+	xgPer90 := e.regressRate(p.XGPer90, e.posMeanXGPer90[p.Position], p.WeightedRateMinutes)
+	xaPer90 := e.regressRate(p.XAPer90, e.posMeanXAPer90[p.Position], p.WeightedRateMinutes)
+	teamAdj := e.teamContextMultiplier(p.TeamID)
+
+	in := PriorRates{
+		XGPer90:           xgPer90 * teamAdj,
+		XAPer90:           xaPer90 * teamAdj,
+		YellowsPer90:      p.YellowsPer90,
+		RedsPer90:         p.RedsPer90,
+		MinutesPerFixture: e.projectMinutes(p) / 38.0,
+	}
+
+	bpsPer90 := p.BPSPer90
+	if !p.HasFPLHistory || bpsPer90 == 0 {
+		bpsPer90 = e.posMeanBPSPer90[p.Position]
+	}
+	in.BonusPerMatch = bonusFromBPS(p.Position, bpsPer90)
+	return in
+}
+
+// buildObservedStats computes current-season PL statistics for each player.
+func buildObservedStats(players []Player, curFixtures map[int][]playerFixtureRow, curGWs map[int][]fplGWRow) map[int]observedStats {
+	result := make(map[int]observedStats, len(players))
+	for _, p := range players {
+		var s observedStats
+		for _, f := range curFixtures[p.ID] {
+			if !f.IsPL {
+				continue
+			}
+			s.Fixtures++
+			s.Minutes += f.Minutes
+			if f.YellowCard {
+				s.Yellows++
+			}
+			if f.RedCard {
+				s.Reds++
+			}
+			if f.XG.Valid {
+				s.XG += f.XG.Float64
+				s.XA += f.XA.Float64
+				s.HasXG = true
+			}
+		}
+		for _, gw := range curGWs[p.ID] {
+			s.BPS += gw.BPS
+		}
+		result[p.ID] = s
+	}
+	return result
+}
+
+// blendInputs Bayesian-updates the pre-season prior with current-season
+// observations, shrinking observed rates by current-season sample size.
+func blendInputs(prior PriorRates, obs observedStats, pos FPLPosition) PriorRates {
+	out := prior
+	if obs.Minutes <= 0 {
+		return out
+	}
+
+	m := float64(obs.Minutes)
+	k := rateShrinkageMinutes
+
+	if obs.HasXG {
+		per90 := m / 90.0
+		out.XGPer90 = blendRate(prior.XGPer90, obs.XG/per90, m, k)
+		out.XAPer90 = blendRate(prior.XAPer90, obs.XA/per90, m, k)
+	}
+	per90 := m / 90.0
+	out.YellowsPer90 = blendRate(prior.YellowsPer90, float64(obs.Yellows)/per90, m, k)
+	out.RedsPer90 = blendRate(prior.RedsPer90, float64(obs.Reds)/per90, m, k)
+
+	if obs.BPS > 0 {
+		obsBonus := bonusFromBPS(pos, float64(obs.BPS)/per90)
+		out.BonusPerMatch = blendRate(prior.BonusPerMatch, obsBonus, m, k)
+	}
+
+	if obs.Fixtures > 0 {
+		out.MinutesPerFixture = blendRate(
+			prior.MinutesPerFixture,
+			float64(obs.Minutes)/float64(obs.Fixtures),
+			float64(obs.Fixtures),
+			minutesShrinkageAppearances,
+		)
+	}
+
+	return out
+}
+
+// blendRate performs the Bayesian shrinkage blend used throughout.
+func blendRate(prior, observed, samples, k float64) float64 {
+	if k <= 0 || samples <= 0 {
+		return prior
+	}
+	return (prior*k + observed*samples) / (k + samples)
+}
+
+// bonusFromBPS converts BPS per 90 into expected bonus points per match.
+// Calibrated from 2025 data: BPS 10/app -> 0.17 bonus/match, BPS 15 -> 0.37,
+// BPS 20 -> 0.70. Capped since bonus goes to the top-3 BPS in each match.
+func bonusFromBPS(pos FPLPosition, bpsPer90 float64) float64 {
+	bonus := math.Max(0, 0.053*bpsPer90-0.36)
+	bonus = math.Min(bonus, 0.75)
+	// GKs accumulate high BPS from saves but rarely win the bonus.
+	if pos == Goalkeeper {
+		bonus = math.Min(bonus, 0.35)
+	}
+	return bonus
+}
+
+// buildProjRates resolves rate inputs into everything needed to project a
+// single fixture.
+func (e *Engine) buildProjRates(p *Player, in PriorRates) projRates {
+	csProb := e.teamCSProbability(p.TeamID)
+
+	var gcPerMatch float64
+	if ts, ok := e.TeamStrengths[p.TeamID]; ok {
+		gcPerMatch = ts.GoalsConcededPerMatch
+	} else {
+		gcPerMatch = 1.3
+	}
+
+	var savesPerMatch float64
+	if p.Position == Goalkeeper {
+		if ts, ok := e.TeamStrengths[p.TeamID]; ok {
+			savesPerMatch = 1.0 + 1.0*ts.GoalsConcededPerMatch
+			if savesPerMatch < 1.5 {
+				savesPerMatch = 1.5
+			}
+		} else {
+			savesPerMatch = 2.3
+		}
+	}
+
+	// Regression model: FPL_per90 from per-90 stats + team context.
+	// Coefficients learned from 2020-2024 PL data via weighted OLS.
+	var fplPer90 float64
+	switch p.Position {
+	case Goalkeeper:
+		fplPer90 = -1.2808 + 9.6820*in.XGPer90 + 4.0947*in.XAPer90 + 8.4996*in.YellowsPer90 +
+			11.2793*csProb + 1.4993*gcPerMatch
+	case Defender:
+		fplPer90 = 0.6733 + 6.0066*in.XGPer90 + 4.8363*in.XAPer90 + 1.2720*in.YellowsPer90 +
+			7.5786*csProb + 0.0011*gcPerMatch
+	case Midfielder:
+		fplPer90 = 0.8004 + 6.6982*in.XGPer90 + 3.5295*in.XAPer90 - 0.0204*in.YellowsPer90 +
+			3.6206*csProb + 0.3866*gcPerMatch
+	case Forward:
+		fplPer90 = 3.0536 + 3.7699*in.XGPer90 + 5.1795*in.XAPer90 + 1.6508*in.YellowsPer90 -
+			0.6691*csProb - 0.2469*gcPerMatch
+	}
+
+	// Appearance-point split: fraction of appearances that are 60+ minutes.
+	// seasonMinutes is the full-season equivalent at this per-match rate.
+	seasonMinutes := in.MinutesPerFixture * 38.0
+	matchesPlayed := math.Min(seasonMinutes/60.0, 38.0)
+	var avgMinPerMatch float64
+	if matchesPlayed > 0 {
+		avgMinPerMatch = seasonMinutes / matchesPlayed
+	}
+
+	var fullMatchFrac float64
+	switch p.Position {
+	case Defender:
+		fullMatchFrac = 0.80
+		if avgMinPerMatch > 0 {
+			fullMatchFrac = math.Min(0.98, fullMatchFrac*(avgMinPerMatch/77.0))
+		}
+	case Midfielder:
+		fullMatchFrac = 0.64
+		if avgMinPerMatch > 0 {
+			fullMatchFrac = math.Min(0.98, fullMatchFrac*(avgMinPerMatch/67.0))
+		}
+	default:
+		fullMatchFrac = 0.75
+		if avgMinPerMatch >= 75 {
+			fullMatchFrac = 0.9
+		} else if avgMinPerMatch >= 60 {
+			fullMatchFrac = 0.8
+		} else if avgMinPerMatch > 0 {
+			fullMatchFrac = 0.4
+		}
+	}
+
+	return projRates{
+		XGPer90:             in.XGPer90,
+		XAPer90:             in.XAPer90,
+		YellowsPer90:        in.YellowsPer90,
+		RedsPer90:           in.RedsPer90,
+		FPLPer90:            fplPer90,
+		BonusPerMatch:       in.BonusPerMatch,
+		CSProb:              csProb,
+		DefconProb:          e.defconProbability(p),
+		GCMatch:             gcPerMatch,
+		SavesPerMatch:       savesPerMatch,
+		AvgAppearancePoints: fullMatchFrac*2.0 + (1.0-fullMatchFrac)*1.0,
+		MinutesPerFixture:   in.MinutesPerFixture,
+	}
+}
+
+// projectPlayer generates a full projection for a single player over their
+// remaining fixtures and sums the totals.
+func (e *Engine) projectPlayer(p *Player, in PriorRates) PlayerProjection {
+	rates := e.buildProjRates(p, in)
+
+	proj := PlayerProjection{
+		PlayerID:  p.ID,
+		FirstName: p.FirstName,
+		LastName:  p.LastName,
+		TeamID:    p.TeamID,
+		TeamName:  p.TeamName,
+		Position:  p.Position.String(),
+	}
+
+	fixtures := e.fixturesByTeam[p.TeamID]
+	if len(fixtures) == 0 {
+		// No schedule (e.g. missing fixtures_fpl_gameweeks rows): fall back
+		// to a flat 38-match season with neutral difficulty.
+		fixtures = syntheticSeason()
+	}
+
+	var av *Availability
+	if a, ok := e.availability[p.ID]; ok {
+		av = &a
+	}
+	byGW := make(map[int][]TeamFixture, len(fixtures))
+	for _, fx := range fixtures {
+		byGW[fx.Gameweek] = append(byGW[fx.Gameweek], fx)
+	}
+
+	for i, fx := range fixtures {
+		m := FixtureMultipliers(byGW[fx.Gameweek], e.TeamStrengths)
+		fp, fc := e.projectFixture(p, rates, fx, m, av, i == 0)
+
+		proj.Gameweeks = append(proj.Gameweeks, fp)
+		proj.ProjectedMinutes += fp.ExpectedMinutes
+		proj.ProjectedGoals += fc.Goals
+		proj.ProjectedAssists += fc.Assists
+		proj.ProjectedCleanSheets += fc.CleanSheets
+		proj.ProjectedBonus += fc.Bonus
+		proj.ProjectedYellows += fc.Yellows
+		proj.ProjectedReds += fc.Reds
+		proj.ProjectedDEFCON += fc.Defcon
+
+		proj.AppearancePoints += fp.AppearancePoints
+		proj.GoalPoints += fp.GoalPoints
+		proj.AssistPoints += fp.AssistPoints
+		proj.CleanSheetPoints += fp.CleanSheetPoints
+		proj.SavePoints += fp.SavePoints
+		proj.BonusPoints += fp.BonusPoints
+		proj.CardPoints += fp.CardPoints
+		proj.GoalsConcededPen += fp.GoalsConcededPen
+		proj.DEFCONPoints += fp.DEFCONPoints
+		proj.ProjectedPoints += fp.ProjectedPoints
+	}
+
+	// Consistency metrics.
+	if len(p.HistoricGWPoints) > 0 {
+		_, stddev := meanStdDev(p.HistoricGWPoints)
+		proj.Consistency = stddev
+		proj.Floor = percentile(p.HistoricGWPoints, 0.10)
+	} else {
+		switch p.Position {
+		case Forward:
+			proj.Consistency = 3.5
+		case Midfielder:
+			proj.Consistency = 3.0
+		case Defender:
+			proj.Consistency = 3.2
+		case Goalkeeper:
+			proj.Consistency = 3.0
+		}
+		proj.Floor = 1.0
+	}
+
+	return proj
+}
+
+// projectFixture projects a single fixture, applying opponent difficulty and
+// availability scaling to the expected minutes.
+func (e *Engine) projectFixture(p *Player, r projRates, fx TeamFixture, m FixtureDifficulty, av *Availability, isFirst bool) (FixtureProjection, fixtureCounts) {
+	fp := FixtureProjection{
+		Gameweek:     fx.Gameweek,
+		FixtureID:    fx.FixtureID,
+		OpponentID:   fx.OpponentID,
+		OpponentName: fx.OpponentName,
+		IsHome:       fx.IsHome,
+	}
+
+	minutes := r.MinutesPerFixture
+	if av != nil {
+		minutes *= e.availabilityScale(av, fx.Date, isFirst)
+	}
+	if minutes <= 0 {
+		return fp, fixtureCounts{}
+	}
+
+	fp.ExpectedMinutes = minutes
+	matchShare := minutes / 90.0
+	appearance := math.Min(1.0, minutes/60.0)
+
+	fp.AppearancePoints = appearance * r.AvgAppearancePoints
+
+	goals := r.XGPer90 * matchShare * m.Attack
+	assists := r.XAPer90 * matchShare * m.Attack
+	cleanSheets := r.CSProb * appearance * m.Defense
+	yellows := r.YellowsPer90 * matchShare
+	reds := r.RedsPer90 * matchShare
+	bonus := r.BonusPerMatch * appearance
+	defcon := r.DefconProb * appearance
+
+	fp.GoalPoints = goals * e.Rules.GoalPoints(p.Position)
+	fp.AssistPoints = assists * e.Rules.AssistPoints
+	fp.CleanSheetPoints = cleanSheets * e.Rules.CleanSheetPoints(p.Position)
+	if p.Position == Goalkeeper {
+		fp.SavePoints = r.SavesPerMatch * appearance / e.Rules.SavesDivisor
+	}
+	fp.BonusPoints = bonus
+	fp.CardPoints = yellows*e.Rules.YellowPoints + reds*e.Rules.RedPoints
+	if p.Position == Goalkeeper || p.Position == Defender {
+		fp.GoalsConcededPen = -(r.GCMatch * appearance * m.Defense / e.Rules.GoalsConcededDivisor)
+	}
+	fp.DEFCONPoints = defcon * e.Rules.DefconPoints
+
+	manual := fp.AppearancePoints +
+		fp.GoalPoints +
+		fp.AssistPoints +
+		fp.CleanSheetPoints +
+		fp.SavePoints +
+		fp.BonusPoints +
+		fp.CardPoints +
+		fp.GoalsConcededPen +
+		fp.DEFCONPoints
+
+	regression := r.FPLPer90 * matchShare * m.Blended(p.Position)
+	fp.ProjectedPoints = 0.60*manual + 0.40*regression
+
+	return fp, fixtureCounts{
+		Goals:       goals,
+		Assists:     assists,
+		CleanSheets: cleanSheets,
+		Bonus:       bonus,
+		Yellows:     yellows,
+		Reds:        reds,
+		Defcon:      defcon,
+	}
+}
+
+// availabilityScale returns the minutes scale for a fixture given a player's
+// availability. Injured/suspended/unavailable players score zero until their
+// return date; the first fixture in the horizon is scaled by the
+// chance-of-playing percentage.
+func (e *Engine) availabilityScale(av *Availability, fixtureDate string, isFirst bool) float64 {
+	if av == nil {
+		return 1.0
+	}
+	status := strings.TrimSpace(av.Status)
+	switch status {
+	case "":
+		return 1.0
+	case "i", "s", "u", "n":
+		if av.NewsReturn != "" && fixtureDate != "" && fixtureDate >= av.NewsReturn {
+			return 1.0
+		}
+		return 0.0
+	case "d":
+		if isFirst {
+			if av.ChanceOfPlayingNext > 0 {
+				return float64(av.ChanceOfPlayingNext) / 100.0
+			}
+			return 0.5
+		}
+		return 1.0
+	default: // "a" (available)
+		if isFirst && av.ChanceOfPlayingNext > 0 && av.ChanceOfPlayingNext < 100 {
+			return float64(av.ChanceOfPlayingNext) / 100.0
+		}
+		return 1.0
+	}
+}
+
+// syntheticSeason returns a flat 38-gameweek schedule with no opponent
+// information, used when a team has no fixture mapping.
+func syntheticSeason() []TeamFixture {
+	fxs := make([]TeamFixture, 38)
+	for i := range fxs {
+		fxs[i] = TeamFixture{Gameweek: i + 1, IsHome: true}
+	}
+	return fxs
 }
 
 // computeRates calculates per-90 rates from historical fixture data.
@@ -197,25 +753,25 @@ func (e *Engine) computeRates(p *Player, fixtures []playerFixtureRow) {
 	// Group by season, tracking all-competition and PL-only separately.
 	type seasonStats struct {
 		// All competitions.
-		minutes  int
-		goals    int
-		assists  int
-		yellows  int
-		reds     int
-		xg       float64
-		xa       float64
-		npxg     float64
-		xgCount  int
+		minutes int
+		goals   int
+		assists int
+		yellows int
+		reds    int
+		xg      float64
+		xa      float64
+		npxg    float64
+		xgCount int
 		// PL only.
-		plMinutes  int
-		plGoals    int
-		plAssists  int
-		plYellows  int
-		plReds     int
-		plXG       float64
-		plXA       float64
-		plNPXG     float64
-		plXGCount  int
+		plMinutes int
+		plGoals   int
+		plAssists int
+		plYellows int
+		plReds    int
+		plXG      float64
+		plXA      float64
+		plNPXG    float64
+		plXGCount int
 		// Competition breakdown for minutes.
 		compMinutes map[int]int // competition_id -> minutes
 	}
@@ -494,210 +1050,6 @@ func (e *Engine) computePositionalMeans(players []Player, fixtures map[int][]pla
 	}
 }
 
-// projectPlayer generates a full projection for a single player.
-func (e *Engine) projectPlayer(p *Player) PlayerProjection {
-	proj := PlayerProjection{
-		PlayerID:  p.ID,
-		FirstName: p.FirstName,
-		LastName:  p.LastName,
-		TeamID:    p.TeamID,
-		TeamName:  p.TeamName,
-		Position:  p.Position.String(),
-	}
-
-	// --- Minutes projection ---
-	projMinutes := e.projectMinutes(p)
-	proj.ProjectedMinutes = projMinutes
-
-	if projMinutes < 45 {
-		// Player unlikely to play — minimal projection.
-		return proj
-	}
-
-	appearances90 := projMinutes / 90.0
-	// Estimate number of matches where they appear.
-	matchesPlayed := math.Min(projMinutes/60.0, 38.0)
-
-	// --- Regressed per-90 rates ---
-	xgPer90 := e.regressRate(p.XGPer90, e.posMeanXGPer90[p.Position], p.WeightedRateMinutes)
-	xaPer90 := e.regressRate(p.XAPer90, e.posMeanXAPer90[p.Position], p.WeightedRateMinutes)
-	yellowsPer90 := p.YellowsPer90
-	redsPer90 := p.RedsPer90
-
-	// --- Team context adjustment ---
-	teamAdj := e.teamContextMultiplier(p.TeamID)
-	xgPer90 *= teamAdj
-	xaPer90 *= teamAdj
-
-	// --- Goals and assists ---
-	proj.ProjectedGoals = xgPer90 * appearances90
-	proj.ProjectedAssists = xaPer90 * appearances90
-
-	// --- Clean sheets ---
-	csProb := e.teamCSProbability(p.TeamID)
-	proj.ProjectedCleanSheets = csProb * matchesPlayed
-
-	// --- Bonus points ---
-	bpsPer90 := p.BPSPer90
-	if !p.HasFPLHistory || bpsPer90 == 0 {
-		bpsPer90 = e.posMeanBPSPer90[p.Position]
-	}
-	// Convert BPS per 90 to bonus points. Calibrated from 2025 data:
-	// BPS 10/app -> 0.17 bonus/match, BPS 15 -> 0.37, BPS 20 -> 0.70
-	// Capped since bonus is awarded to top-3 BPS in each match, so
-	// even the best players can't exceed ~0.75/match over a season.
-	bonusPerMatch := math.Max(0, 0.053*bpsPer90-0.36)
-	bonusPerMatch = math.Min(bonusPerMatch, 0.75)
-	// GKs accumulate high BPS from saves but rarely win the bonus
-	// because they compete with outfield scorers.
-	if p.Position == Goalkeeper {
-		bonusPerMatch = math.Min(bonusPerMatch, 0.35)
-	}
-	proj.ProjectedBonus = bonusPerMatch * matchesPlayed
-
-	// --- Cards ---
-	proj.ProjectedYellows = yellowsPer90 * appearances90
-	proj.ProjectedReds = redsPer90 * appearances90
-
-	// --- DEFCON ---
-	defconProb := e.defconProbability(p)
-	proj.ProjectedDEFCON = defconProb * matchesPlayed
-
-	// --- Convert to FPL points ---
-
-	// Appearance points: 2 for 60+ min, 1 for <60 min.
-	// For MID and DEF, use position-specific 60+ minute rates
-	// calibrated from PL data, scaled by this player's projected
-	// avg minutes relative to the position norm.
-	// GK and FWD keep the original avg-min-based logic.
-	var fullMatchFrac float64
-	switch p.Position {
-	case Defender:
-		fullMatchFrac = 0.80
-		if projMinutes > 0 && matchesPlayed > 0 {
-			ratio := (projMinutes / matchesPlayed) / 77.0
-			fullMatchFrac = math.Min(0.98, fullMatchFrac*ratio)
-		}
-	case Midfielder:
-		fullMatchFrac = 0.64
-		if projMinutes > 0 && matchesPlayed > 0 {
-			ratio := (projMinutes / matchesPlayed) / 67.0
-			fullMatchFrac = math.Min(0.98, fullMatchFrac*ratio)
-		}
-	default:
-		fullMatchFrac = 0.75
-		if projMinutes > 0 && matchesPlayed > 0 {
-			avgMinPerMatch := projMinutes / matchesPlayed
-			if avgMinPerMatch >= 75 {
-				fullMatchFrac = 0.9
-			} else if avgMinPerMatch >= 60 {
-				fullMatchFrac = 0.8
-			} else {
-				fullMatchFrac = 0.4
-			}
-		}
-	}
-	proj.AppearancePoints = matchesPlayed * (fullMatchFrac*2.0 + (1.0-fullMatchFrac)*1.0)
-
-	proj.GoalPoints = proj.ProjectedGoals * p.Position.GoalPoints()
-	proj.AssistPoints = proj.ProjectedAssists * 3.0
-	proj.CleanSheetPoints = proj.ProjectedCleanSheets * p.Position.CleanSheetPoints()
-	proj.BonusPoints = proj.ProjectedBonus
-
-	proj.CardPoints = -(proj.ProjectedYellows*1.0 + proj.ProjectedReds*3.0)
-
-	// Goals conceded per match (used for GC penalty and regression).
-	var gcPerMatch float64
-	if ts, ok := e.TeamStrengths[p.TeamID]; ok {
-		gcPerMatch = ts.GoalsConcededPerMatch
-	} else {
-		gcPerMatch = 1.3
-	}
-
-	// Goals conceded penalty: GK/DEF lose 1 pt per 2 goals conceded.
-	if p.Position == Goalkeeper || p.Position == Defender {
-		totalGC := gcPerMatch * matchesPlayed
-		proj.GoalsConcededPen = -(totalGC / 2.0)
-	}
-
-	proj.DEFCONPoints = proj.ProjectedDEFCON * 2.0
-
-	// Save points: GK only, 1 pt per 3 saves.
-	// Calibrated from actual FPL data: starting GKs average ~2.3 FPL
-	// saves per match, varying by team defensive quality.
-	if p.Position == Goalkeeper {
-		var savesPerMatch float64
-		if ts, ok := e.TeamStrengths[p.TeamID]; ok {
-			// Better defensive teams face fewer shots → fewer saves.
-			// Bad teams face more shots → more saves.
-			// Calibration: savesPerMatch ≈ 1.0 + 1.0 * xGA
-			savesPerMatch = 1.0 + 1.0*ts.GoalsConcededPerMatch
-			if savesPerMatch < 1.5 {
-				savesPerMatch = 1.5
-			}
-		} else {
-			savesPerMatch = 2.3
-		}
-		proj.SavePoints = (savesPerMatch * matchesPlayed) / 3.0
-	}
-
-	manualTotal := proj.AppearancePoints +
-		proj.GoalPoints +
-		proj.AssistPoints +
-		proj.CleanSheetPoints +
-		proj.SavePoints +
-		proj.BonusPoints +
-		proj.CardPoints +
-		proj.GoalsConcededPen +
-		proj.DEFCONPoints
-
-	// Regression model: FPL_per90 from per-90 stats + team context.
-	// Coefficients learned from 2020-2024 PL data via weighted OLS.
-	var fplPer90 float64
-	switch p.Position {
-	case Goalkeeper:
-		fplPer90 = -1.2808 + 9.6820*xgPer90 + 4.0947*xaPer90 + 8.4996*yellowsPer90 +
-			11.2793*csProb + 1.4993*gcPerMatch
-	case Defender:
-		fplPer90 = 0.6733 + 6.0066*xgPer90 + 4.8363*xaPer90 + 1.2720*yellowsPer90 +
-			7.5786*csProb + 0.0011*gcPerMatch
-	case Midfielder:
-		fplPer90 = 0.8004 + 6.6982*xgPer90 + 3.5295*xaPer90 - 0.0204*yellowsPer90 +
-			3.6206*csProb + 0.3866*gcPerMatch
-	case Forward:
-		fplPer90 = 3.0536 + 3.7699*xgPer90 + 5.1795*xaPer90 + 1.6508*yellowsPer90 -
-			0.6691*csProb - 0.2469*gcPerMatch
-	}
-	regressionTotal := fplPer90 * appearances90
-
-	// Blend: 60% manual (well-calibrated totals) + 40% regression
-	// (better learned bonus/DEFCON/interaction effects).
-	proj.ProjectedPoints = 0.60*manualTotal + 0.40*regressionTotal
-
-	// --- Consistency metrics ---
-	if len(p.HistoricGWPoints) > 0 {
-		mean, stddev := meanStdDev(p.HistoricGWPoints)
-		proj.Consistency = stddev
-		proj.Floor = percentile(p.HistoricGWPoints, 0.10)
-		_ = mean
-	} else {
-		// Estimate from position.
-		switch p.Position {
-		case Forward:
-			proj.Consistency = 3.5
-		case Midfielder:
-			proj.Consistency = 3.0
-		case Defender:
-			proj.Consistency = 3.2
-		case Goalkeeper:
-			proj.Consistency = 3.0
-		}
-		proj.Floor = 1.0
-	}
-
-	return proj
-}
-
 // projectMinutes estimates total PL season minutes for a player.
 func (e *Engine) projectMinutes(p *Player) float64 {
 	if len(p.MinutesPerSeason) == 0 {
@@ -863,9 +1215,41 @@ func (e *Engine) defconProbability(p *Player) float64 {
 	}
 }
 
+// blendTeamStrengths blends current-season team form into the prior
+// strengths using match-count shrinkage. Teams with no prior rating are
+// taken from current-season data directly.
+func blendTeamStrengths(prior, current map[int]*TeamStrength) map[int]*TeamStrength {
+	out := make(map[int]*TeamStrength, len(prior)+len(current))
+	for id, ts := range prior {
+		cp := *ts
+		out[id] = &cp
+	}
+	for id, cur := range current {
+		ps, ok := out[id]
+		if !ok {
+			cp := *cur
+			out[id] = &cp
+			continue
+		}
+		m := float64(cur.Matches)
+		if m <= 0 {
+			continue
+		}
+		w := m / (m + teamShrinkageMatches)
+		ps.OffensiveRating = ps.OffensiveRating*(1-w) + cur.OffensiveRating*w
+		ps.DefensiveRating = ps.DefensiveRating*(1-w) + cur.DefensiveRating*w
+		ps.GoalsConcededPerMatch = ps.GoalsConcededPerMatch*(1-w) + cur.GoalsConcededPerMatch*w
+		// Recompute the Poisson clean-sheet probability from the blended
+		// defensive rating; the 70/30 actual-vs-Poisson blend in
+		// teamCSProbability keeps using this as its Poisson component.
+		ps.CleanSheetProb = math.Exp(-ps.DefensiveRating)
+	}
+	return out
+}
+
 // computeVORP calculates Value Over Replacement Player for each projection.
 func (e *Engine) computeVORP(projections []PlayerProjection) {
-	// Count how many of each position are drafted in an 8-team league.
+	// Count how many of each position are drafted in an N-team league.
 	// 2 GK, 5 DEF, 5 MID, 3 FWD per team.
 	draftedPerPos := map[string]int{
 		"GK":  e.LeagueSize * 2,

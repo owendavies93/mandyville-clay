@@ -2,8 +2,9 @@
 
 ## Project Structure
 
-- `projection/` — Core projection engine: `engine.go` (pipeline + scoring), `loader.go` (DB queries), `models.go` (types), `db.go` (connection), `fixtures.go` (fixture-difficulty adjustment)
-- `cmd/project/` — CLI to generate projections and run backtests
+- `projection/` — Core projection engine: `engine.go` (pipeline, scoring rules, in-season blending), `loader.go` (DB queries), `models.go` (types), `db.go` (connection), `fixtures.go` (fixture-difficulty adjustment), `persist.go` (projection-run snapshots), `engine_test.go`
+- `cmd/project/` — CLI to generate projections (pre-season or in-season) and optionally persist them
+- `cmd/backtest/` — CLI for season-level and rolling in-season backtests
 - `cmd/draft/` — Bubble Tea TUI for live draft management
 - `cmd/squad/` — CLI to select the optimal Classic FPL opening squad within budget
 - `PERFORMANCE.md` — Backtest results, experiment history, improvement roadmap
@@ -16,7 +17,8 @@ PostgreSQL `mandyville` on `localhost:5432` (user: `postgres`, pass: `password`)
 
 ## Development
 
-- Backtest with `go run ./cmd/project/ -season 2025 -backtest -output backtest_2025.json`
+- Season backtest: `go run ./cmd/backtest/ -season 2025`
+- Rolling in-season backtest: `go run ./cmd/backtest/ -season 2025 -rolling`
 - Evaluate with `python3 evaluate.py backtest_2025.json` (not committed — local utility)
 - When testing model changes, use isolated branches and compare metrics against the baseline in PERFORMANCE.md
 - The TUI requires a TTY and cannot be tested in headless environments
@@ -27,4 +29,7 @@ PostgreSQL `mandyville` on `localhost:5432` (user: `postgres`, pass: `password`)
 - Regression coefficients in `engine.go` were trained on 2020-2024 PL data. If retraining, update the comments alongside the constants.
 - Competition tiers are defined in `LoadCompetitionTiers` in `loader.go`. Top-7 European leagues are TierTop5.
 - Transfer detection relies on `IsTransferIn` set in `computeRates` — players with no PL minutes in the 3 most recent seasons who are now at a PL team.
-- The squad selector (`cmd/squad`) uses `LoadPlayerPrices` (starting prices, GW1 fallback) and `LoadFixturesByGameweek` (via the `fixtures_fpl_gameweeks` mapping table) plus `FixtureDifficultyMultiplier` in `fixtures.go`. Classic FPL rules live in `scratch/fantasy-premier-league-rules.md`.
+- Scoring is parameterised by `ScoringRules` (`ClassicRules` vs `DraftRules` in `models.go`). Draft gives GKs 10 points per goal; keep these in sync with `draft.premierleague.com/api/bootstrap-static settings.scoring`.
+- In-season blending shrinkage constants live at the top of `engine.go`: `rateShrinkageMinutes` (900, per-90 rates), `minutesShrinkageAppearances` (5, minutes/fixture), `teamShrinkageMatches` (10, team strengths). Tune via the rolling backtest.
+- Projection snapshots are persisted to `fpl_projection_runs`/`fpl_projections` (`cmd/project -persist`). The in-season engine currently recomputes its pre-season prior rather than loading a snapshot — wire the snapshot in before January so mid-season `players_teams` changes don't drift the prior.
+- The squad selector (`cmd/squad`) reads the engine's per-gameweek projections from `projections.json` (no longer applies its own `/38` + fixture-multiplier approximation). Classic FPL rules live in `scratch/fantasy-premier-league-rules.md`.

@@ -32,6 +32,17 @@ type configFile struct {
 // LoadDBConfigFromFile reads database connection details from a mandyville
 // config.yaml file. It uses the read_user by default.
 func LoadDBConfigFromFile(path string) (DBConfig, error) {
+	return loadDBConfigFromFile(path, false)
+}
+
+// LoadWriteDBConfigFromFile reads database connection details from a
+// mandyville config.yaml file, using the write_user. Use it for commands
+// that persist runs (projections, recommendations).
+func LoadWriteDBConfigFromFile(path string) (DBConfig, error) {
+	return loadDBConfigFromFile(path, true)
+}
+
+func loadDBConfigFromFile(path string, write bool) (DBConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return DBConfig{}, fmt.Errorf("reading config file: %w", err)
@@ -42,10 +53,15 @@ func LoadDBConfigFromFile(path string) (DBConfig, error) {
 		return DBConfig{}, fmt.Errorf("parsing config file: %w", err)
 	}
 
+	user := cf.Database.ReadUser
+	if write {
+		user = cf.Database.WriteUser
+	}
+
 	return DBConfig{
 		Host:     cf.Database.Host,
 		Port:     cf.Database.Port,
-		User:     cf.Database.ReadUser,
+		User:     user,
 		Password: cf.Database.Pass,
 		DBName:   cf.Database.DB,
 	}, nil

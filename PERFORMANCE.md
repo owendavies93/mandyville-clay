@@ -1,6 +1,35 @@
 # Projection Model Performance
 
-## Backtest: 2025 Season
+## Fixture-level & in-season model (2025-08)
+
+The engine now projects per fixture (opponent difficulty, blanks, doubles) and
+supports in-season Bayesian updating. Pre-season totals are the sum of fixture
+projections, so the previous season-total baseline is superseded.
+
+### Pre-season 2025 (fixture-level, vs prior baseline)
+
+| Metric | Prior baseline | Fixture-level |
+|---|---|---|
+| RMSE (all 803) | 46.3 | **42.2** |
+| MAE (all 803) | 32.9 | **29.2** |
+| Spearman (players >30 pts, n=360) | 0.351 | **0.366** |
+| Spearman (all 803) | — | 0.681 |
+
+### Rolling in-season backtest, 2025
+
+At each gameweek k the engine projects the remaining fixtures using only data
+available before k's deadline, scored over the next h gameweeks. Lift is the
+mean actual points of our top-20 projected players minus the field mean, by
+position.
+
+| Horizon | n | MAE | RMSE | Spearman | Top-20 lift (GK/DEF/MID/FWD) |
+|---|---|---|---|---|---|
+| 1 GW | 28046 | 1.38 | 2.18 | 0.566 | +1.53 / +2.07 / +2.55 / +1.55 |
+| 3 GW | 27106 | 3.24 | 4.67 | 0.637 | +4.51 / +5.97 / +7.41 / +4.34 |
+| 5 GW | 25714 | 4.86 | 6.93 | 0.665 | +7.45 / +9.70 / +12.26 / +7.15 |
+| 8 GW | 23581 | 7.10 | 10.11 | 0.688 | +11.74 / +14.87 / +19.61 / +11.57 |
+
+## Backtest: 2025 Season (prior season-total model)
 
 Projections for 803 FPL players using data from seasons prior to 2025. Compared against actual 2025 FPL points.
 

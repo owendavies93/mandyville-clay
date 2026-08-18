@@ -2,21 +2,26 @@ package projection
 
 import "math"
 
-// FixtureDifficultyMultiplier computes a scaling factor for a player's
-// projected points over a set of fixtures, based on the strength of the
-// opponents faced relative to the league average.
+// FixtureDifficulty holds the attacking and defensive difficulty scaling
+// factors for a set of fixtures. Values > 1 mean an easier-than-average
+// run for that facet, < 1 means harder.
+type FixtureDifficulty struct {
+	Attack  float64
+	Defense float64
+}
+
+// FixtureMultipliers computes the attacking and defensive difficulty of a
+// set of fixtures relative to league averages. The full-season projection
+// already incorporates the player's own team strength; this adjusts for the
+// specific opponents in the window.
 //
-// The full-season projection already incorporates the player's own team
-// strength; this adjusts for the specific opponents in the fixture window.
-// A value > 1 means an easier-than-average run, < 1 means harder.
-//
-//   - attacking output: compares opponents' goals conceded per match to
-//     the league average (leakier opponents -> higher multiplier)
+//   - attacking output: compares opponents' goals conceded per match to the
+//     league average (leakier opponents -> higher multiplier)
 //   - defensive output: compares opponents' goals scored per match to the
 //     league average (weaker attacks -> higher multiplier)
-func FixtureDifficultyMultiplier(fixtures []TeamFixture, strengths map[int]*TeamStrength, pos FPLPosition) float64 {
+func FixtureMultipliers(fixtures []TeamFixture, strengths map[int]*TeamStrength) FixtureDifficulty {
 	if len(fixtures) == 0 {
-		return 1.0
+		return FixtureDifficulty{Attack: 1.0, Defense: 1.0}
 	}
 
 	// League averages from the strengths map.
@@ -28,7 +33,7 @@ func FixtureDifficultyMultiplier(fixtures []TeamFixture, strengths map[int]*Team
 		n++
 	}
 	if n == 0 || leagueAvgOff == 0 || leagueAvgGC == 0 {
-		return 1.0
+		return FixtureDifficulty{Attack: 1.0, Defense: 1.0}
 	}
 	leagueAvgOff /= float64(n)
 	leagueAvgGC /= float64(n)
@@ -48,21 +53,33 @@ func FixtureDifficultyMultiplier(fixtures []TeamFixture, strengths map[int]*Team
 		defenseRatio += leagueAvgOff / oppOff
 	}
 
-	attackMult := math.Sqrt(attackRatio / float64(len(fixtures)))
-	defenseMult := math.Sqrt(defenseRatio / float64(len(fixtures)))
+	return FixtureDifficulty{
+		Attack:  math.Sqrt(attackRatio / float64(len(fixtures))),
+		Defense: math.Sqrt(defenseRatio / float64(len(fixtures))),
+	}
+}
 
-	// Blend by position: GKs and DEFs benefit mostly from clean sheets,
-	// FWDs purely from attacking returns, MIDs in between.
+// Blended returns a single position-appropriate difficulty factor for the
+// multipliers. GKs and DEFs benefit mostly from clean sheets, FWDs purely
+// from attacking returns, MIDs in between.
+func (m FixtureDifficulty) Blended(pos FPLPosition) float64 {
 	switch pos {
 	case Goalkeeper:
-		return defenseMult
+		return m.Defense
 	case Defender:
-		return 0.75*defenseMult + 0.25*attackMult
+		return 0.75*m.Defense + 0.25*m.Attack
 	case Midfielder:
-		return 0.90*attackMult + 0.10*defenseMult
+		return 0.90*m.Attack + 0.10*m.Defense
 	case Forward:
-		return attackMult
+		return m.Attack
 	default:
-		return (attackMult + defenseMult) / 2
+		return (m.Attack + m.Defense) / 2
 	}
+}
+
+// FixtureDifficultyMultiplier computes a single blended scaling factor for
+// a player's projected points over a set of fixtures, based on the strength
+// of the opponents faced relative to the league average.
+func FixtureDifficultyMultiplier(fixtures []TeamFixture, strengths map[int]*TeamStrength, pos FPLPosition) float64 {
+	return FixtureMultipliers(fixtures, strengths).Blended(pos)
 }
