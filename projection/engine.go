@@ -48,6 +48,18 @@ const (
 	// same scheme, keyed on current-season matches played.
 	teamShrinkageMatches = 10.0
 
+	// Expected-return decay for injuries and suspensions the game gives
+	// no return date for. The chance of being back by the nth fixture
+	// after the current one is 1-exp(-n/tau), so a player is always out
+	// for the next match and recovers from there. FPL reports "Unknown
+	// return date" for everything from a fortnight's knock to a
+	// cruciate, hence a tau long enough not to rush stars back.
+	injuryReturnTau = 3.0
+
+	// Suspensions are far more predictable: a one-match ban is the norm,
+	// with three for a red card.
+	suspensionReturnTau = 1.0
+
 	// EngineVersion is recorded against persisted projection runs so old
 	// snapshots can be traced back to the model that produced them.
 	EngineVersion = "2.0-fixture-level"
@@ -565,6 +577,14 @@ func (e *Engine) projectPlayer(p *Player, in PriorRates) PlayerProjection {
 		Position:  p.Position.String(),
 	}
 
+	// Note: it is tempting to return an empty projection here for anyone
+	// players_teams does not place at a Premier League club, since they
+	// have no Premier League fixtures to score in. Don't: that signal is
+	// too weak to act on. Backtesting 2025 zeroed 196 players, 62 of whom
+	// went on to score (one of them 121 points), because the mapping
+	// lags late-window signings and has gaps. The softer minutes discount
+	// in projectMinutes is the right hedge; positive evidence of a
+	// departure comes from the availability feed instead, via status "u".
 	fixtures := e.fixturesByTeam[p.TeamID]
 	if len(fixtures) == 0 {
 		// No schedule (e.g. missing fixtures_fpl_gameweeks rows): fall back
@@ -583,7 +603,7 @@ func (e *Engine) projectPlayer(p *Player, in PriorRates) PlayerProjection {
 
 	for i, fx := range fixtures {
 		m := FixtureMultipliers(byGW[fx.Gameweek], e.TeamStrengths)
-		fp, fc := e.projectFixture(p, rates, fx, m, av, i == 0)
+		fp, fc := e.projectFixture(p, rates, fx, m, av, i)
 
 		proj.Gameweeks = append(proj.Gameweeks, fp)
 		proj.ProjectedMinutes += fp.ExpectedMinutes
@@ -630,8 +650,10 @@ func (e *Engine) projectPlayer(p *Player, in PriorRates) PlayerProjection {
 }
 
 // projectFixture projects a single fixture, applying opponent difficulty and
-// availability scaling to the expected minutes.
-func (e *Engine) projectFixture(p *Player, r projRates, fx TeamFixture, m FixtureDifficulty, av *Availability, isFirst bool) (FixtureProjection, fixtureCounts) {
+// availability scaling to the expected minutes. fixtureIdx is the fixture's
+// position in the projected schedule, used to age out injuries and
+// suspensions with no known return date.
+func (e *Engine) projectFixture(p *Player, r projRates, fx TeamFixture, m FixtureDifficulty, av *Availability, fixtureIdx int) (FixtureProjection, fixtureCounts) {
 	fp := FixtureProjection{
 		Gameweek:     fx.Gameweek,
 		FixtureID:    fx.FixtureID,
@@ -642,7 +664,7 @@ func (e *Engine) projectFixture(p *Player, r projRates, fx TeamFixture, m Fixtur
 
 	minutes := r.MinutesPerFixture
 	if av != nil {
-		minutes *= e.availabilityScale(av, fx.Date, isFirst)
+		minutes *= e.availabilityScale(av, fx.Date, fixtureIdx)
 	}
 	if minutes <= 0 {
 		return fp, fixtureCounts{}
@@ -700,22 +722,44 @@ func (e *Engine) projectFixture(p *Player, r projRates, fx TeamFixture, m Fixtur
 }
 
 // availabilityScale returns the minutes scale for a fixture given a player's
-// availability. Injured/suspended/unavailable players score zero until their
-// return date; the first fixture in the horizon is scaled by the
-// chance-of-playing percentage.
-func (e *Engine) availabilityScale(av *Availability, fixtureDate string, isFirst bool) float64 {
+// availability. Where a return date is known it is honoured exactly: zero
+// before it, full from it. Where one is not, an injury or suspension is aged
+// out over the following fixtures rather than being treated as
+// season-ending, while a player who has left the club is not.
+//
+// fixtureIdx is the fixture's position in the projected schedule, so index 0
+// is the next match to be played.
+func (e *Engine) availabilityScale(av *Availability, fixtureDate string, fixtureIdx int) float64 {
 	if av == nil {
 		return 1.0
 	}
+	isFirst := fixtureIdx == 0
 	status := strings.TrimSpace(av.Status)
 	switch status {
 	case "":
 		return 1.0
-	case "i", "s", "u", "n":
+	case "u", "n":
+		// Unavailable or not in the squad: sold, loaned out or
+		// unregistered. Gone for the season unless a return is known.
 		if av.NewsReturn != "" && fixtureDate != "" && fixtureDate >= av.NewsReturn {
 			return 1.0
 		}
 		return 0.0
+	case "i", "s":
+		if av.NewsReturn != "" && fixtureDate != "" {
+			if fixtureDate >= av.NewsReturn {
+				return 1.0
+			}
+			return 0.0
+		}
+		// No return date given ("Unknown return date"), so treat the
+		// absence as a hazard: certainly out for the next match, then
+		// increasingly likely to be back.
+		tau := injuryReturnTau
+		if status == "s" {
+			tau = suspensionReturnTau
+		}
+		return 1 - math.Exp(-float64(fixtureIdx)/tau)
 	case "d":
 		if isFirst {
 			if av.ChanceOfPlayingNext > 0 {

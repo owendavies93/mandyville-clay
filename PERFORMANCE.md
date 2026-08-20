@@ -174,12 +174,40 @@ Key impact: Salah 295→230 (actual 123), Haaland 213→198 (actual 232).
 
 **Verdict**: Marginal overall. Helps with extreme outlier calibration (Salah is much more reasonable) but hurts legitimate elite projections (Haaland is now under-projected by 34 instead of 19). The 95th percentile hard cap is too aggressive for genuinely elite players.
 
+### 5. Zero out players with no PL club (`players_teams` cross-check)
+
+The availability feed marks players who have left the league with status
+`u`, which the engine treats as season-ending. The obvious generalisation
+is to zero anyone `players_teams` does not place at a Premier League club,
+since they have no PL fixtures to score in — without it such players fall
+through to the synthetic 38-match schedule and are projected a phantom
+season at a foreign club.
+
+| Metric | Baseline | After | Δ |
+|---|---|---|---|
+| RMSE (all 803) | 42.2 | 42.7 | +0.5 |
+| MAE (all 803) | 29.2 | 28.4 | **−0.8** |
+| Spearman (all 803) | 0.681 | 0.665 | −0.016 |
+
+The split result is the tell: typical error improves while RMSE and rank
+correlation worsen, meaning a handful of players are now badly wrong. In
+2025 the rule zeroed 196 players, **62 of whom went on to score**, averaging
+9.5 points with a maximum of 121. `players_teams` lags late-window signings
+and has gaps, so "not recorded at a PL club" is much weaker evidence than
+it looks.
+
+**Verdict**: Excluded. Absence of evidence of PL membership is not
+evidence of absence; the softer minutes discount in `projectMinutes` is the
+appropriate hedge. Positive evidence of a departure should come from the
+availability feed (`u`), which is a real signal and is handled separately.
+
 ### Recommendations
 
 1. **Include**: Transfer detection + Primeira Liga/Eredivisie tier fix. Essential for correctly projecting foreign transfers, which are high-value draft picks.
 2. **Include**: Position-specific minutes model (MID/DEF only). Corrects appearance point over-estimation for midfielders and defenders without worsening the forward under-projection.
 3. **Include**: FPL regression blend. Best overall MAE improvement and near-perfect MID bias correction.
 4. **Exclude**: Rate caps at 95th percentile. Too blunt — hurts Haaland more than it helps. Consider a softer approach (e.g., cap at p97, or only cap if the player's most recent season shows decline).
+5. **Exclude**: `players_teams` zeroing. Acts on a signal too weak to trust; keep the minutes discount instead.
 
 The three recommended changes are complementary (they address different aspects: transfer handling, appearance points, and point conversion). They should be combined and re-tested on a merged branch.
 

@@ -77,45 +77,87 @@ func TestAvailabilityScale(t *testing.T) {
 	e := &Engine{}
 
 	// No availability info: full minutes.
-	if got := e.availabilityScale(nil, "", false); got != 1 {
+	if got := e.availabilityScale(nil, "", 0); got != 1 {
 		t.Errorf("nil availability = %v, want 1", got)
 	}
 
-	// Injured before return date: out.
+	// A known return date is honoured exactly, whichever fixture it is.
 	injured := &Availability{Status: "i", NewsReturn: "2026-09-01"}
-	if got := e.availabilityScale(injured, "2026-08-20", false); got != 0 {
+	if got := e.availabilityScale(injured, "2026-08-20", 0); got != 0 {
 		t.Errorf("injured before return = %v, want 0", got)
 	}
-	// Injured after return date: back.
-	if got := e.availabilityScale(injured, "2026-09-02", false); got != 1 {
+	if got := e.availabilityScale(injured, "2026-09-02", 4); got != 1 {
 		t.Errorf("injured after return = %v, want 1", got)
-	}
-	// Injured with no return date: out.
-	if got := e.availabilityScale(&Availability{Status: "i"}, "2026-08-20", false); got != 0 {
-		t.Errorf("injured no return = %v, want 0", got)
-	}
-
-	// Suspended: out until return.
-	if got := e.availabilityScale(&Availability{Status: "s"}, "2026-08-20", false); got != 0 {
-		t.Errorf("suspended = %v, want 0", got)
 	}
 
 	// Doubtful, first fixture, 75% chance.
-	if got := e.availabilityScale(&Availability{Status: "d", ChanceOfPlayingNext: 75}, "", true); got != 0.75 {
+	if got := e.availabilityScale(&Availability{Status: "d", ChanceOfPlayingNext: 75}, "", 0); got != 0.75 {
 		t.Errorf("doubtful 75%% = %v, want 0.75", got)
 	}
 	// Doubtful with no percentage: default 50%.
-	if got := e.availabilityScale(&Availability{Status: "d"}, "", true); got != 0.5 {
+	if got := e.availabilityScale(&Availability{Status: "d"}, "", 0); got != 0.5 {
 		t.Errorf("doubtful no chance = %v, want 0.5", got)
+	}
+	// Doubtful only dents the imminent fixture.
+	if got := e.availabilityScale(&Availability{Status: "d"}, "", 1); got != 1 {
+		t.Errorf("doubtful later fixture = %v, want 1", got)
 	}
 
 	// Available, late test at 50%.
-	if got := e.availabilityScale(&Availability{Status: "a", ChanceOfPlayingNext: 50}, "", true); got != 0.5 {
+	if got := e.availabilityScale(&Availability{Status: "a", ChanceOfPlayingNext: 50}, "", 0); got != 0.5 {
 		t.Errorf("available 50%% = %v, want 0.5", got)
 	}
 	// Available, no flag: full.
-	if got := e.availabilityScale(&Availability{Status: "a"}, "", true); got != 1 {
+	if got := e.availabilityScale(&Availability{Status: "a"}, "", 0); got != 1 {
 		t.Errorf("available = %v, want 1", got)
+	}
+}
+
+// An injury or suspension with no return date must not write off the whole
+// season: the player is out for the next match, then increasingly likely to
+// feature. Leaving the club, by contrast, is season-ending.
+func TestAvailabilityScaleUnknownReturn(t *testing.T) {
+	e := &Engine{}
+
+	injured := &Availability{Status: "i"}
+	if got := e.availabilityScale(injured, "2026-08-20", 0); got != 0 {
+		t.Errorf("injured, next fixture = %v, want 0", got)
+	}
+
+	prev := 0.0
+	for idx := 1; idx <= 10; idx++ {
+		got := e.availabilityScale(injured, "", idx)
+		if got <= prev {
+			t.Errorf("injured at fixture %d = %v, want > %v", idx, got, prev)
+		}
+		if got >= 1 {
+			t.Errorf("injured at fixture %d = %v, want < 1", idx, got)
+		}
+		prev = got
+	}
+
+	// 1-exp(-3/3) three fixtures out.
+	if got := e.availabilityScale(injured, "", 3); math.Abs(got-0.6321) > 1e-3 {
+		t.Errorf("injured at fixture 3 = %v, want ~0.632", got)
+	}
+
+	// Suspensions are shorter and more certain, so they recover faster.
+	suspended := &Availability{Status: "s"}
+	if got := e.availabilityScale(suspended, "", 0); got != 0 {
+		t.Errorf("suspended, next fixture = %v, want 0", got)
+	}
+	if s, i := e.availabilityScale(suspended, "", 2), e.availabilityScale(injured, "", 2); s <= i {
+		t.Errorf("suspended at fixture 2 = %v, want > injured %v", s, i)
+	}
+
+	// Sold, loaned out or unregistered: gone for the season.
+	for _, status := range []string{"u", "n"} {
+		for _, idx := range []int{0, 5, 20} {
+			got := e.availabilityScale(&Availability{Status: status}, "", idx)
+			if got != 0 {
+				t.Errorf("status %q at fixture %d = %v, want 0", status, idx, got)
+			}
+		}
 	}
 }
 
