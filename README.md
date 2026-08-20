@@ -89,6 +89,7 @@ Flags:
 | `-budget` | 100.0 | Total budget in millions |
 | `-season` | 2026 | Season for prices and fixtures |
 | `-gameweeks` | 6 | Number of opening gameweeks to optimise for |
+| `-json` | — | Write the selected squad to this file as JSON |
 | `-db-*` | — | Database connection (same as `cmd/project`) |
 
 ## Projection Model

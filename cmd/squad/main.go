@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/mandyville/mandyville-draft/projection"
 )
@@ -200,6 +201,7 @@ type squad struct {
 	xi      []int // indices into players
 	bench   []int
 	captain int // index into players (also in xi)
+	vice    int // index into players (also in xi)
 }
 
 func (s squad) score(players []cPlayer) float64 {
@@ -211,6 +213,17 @@ func (s squad) score(players []cPlayer) float64 {
 	// every gameweek, so only the opening week matters here.
 	total += players[s.captain].gw1Points
 	return total
+}
+
+// gw1Score is the projected XI total for the upcoming gameweek, including
+// the captain's doubled score. The vice captain is ignored: it only pays
+// out when the captain doesn't play, which this model doesn't estimate.
+func (s squad) gw1Score(players []cPlayer) float64 {
+	total := 0.0
+	for _, i := range s.xi {
+		total += players[i].gw1Points
+	}
+	return total + players[s.captain].gw1Points
 }
 
 func (s squad) cost(players []cPlayer) float64 {
@@ -247,7 +260,7 @@ func optimise(players []cPlayer, budget float64) squad {
 			continue
 		}
 		s := squad{xi: xi, bench: bench}
-		s.captain = pickCaptain(players, s.xi)
+		s.captain, s.vice = pickCaptaincy(players, s.xi)
 		s = improve(players, s, budget, form)
 
 		if sc := s.score(players); sc > bestScore {
@@ -393,16 +406,38 @@ func cheapestAvailable(players []cPlayer, used []bool, clubCount map[int]int, sl
 	return best
 }
 
-// pickCaptain returns the index of the XI player with the best GW1
-// projection, since the captain is chosen for the opening gameweek only.
-func pickCaptain(players []cPlayer, xi []int) int {
-	best := xi[0]
+// pickCaptaincy returns the XI indices of the best and second-best GW1
+// projections: the armband is chosen for the opening gameweek only, and
+// the vice captain is the fallback if the captain doesn't start.
+func pickCaptaincy(players []cPlayer, xi []int) (captain, vice int) {
+	captain, vice = xi[0], -1
 	for _, i := range xi[1:] {
-		if players[i].gw1Points > players[best].gw1Points {
-			best = i
+		switch {
+		case players[i].gw1Points > players[captain].gw1Points:
+			vice = captain
+			captain = i
+		case vice < 0 || players[i].gw1Points > players[vice].gw1Points:
+			vice = i
 		}
 	}
-	return best
+	if vice < 0 {
+		vice = captain
+	}
+	return captain, vice
+}
+
+// playerName is the display name for a projection.
+func playerName(p cPlayer) string {
+	return strings.TrimSpace(p.proj.FirstName + " " + p.proj.LastName)
+}
+
+// truncate shortens s to at most n runes.
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n])
+	}
+	return s
 }
 
 // improve runs local search: minimise bench cost, then upgrade XI players,
@@ -434,7 +469,7 @@ func improve(players []cPlayer, s squad, budget float64, form formation) squad {
 				// Tentatively swap and check club limit + budget.
 				probe := append([]int{}, best.bench...)
 				probe[bi] = j
-				cand := squad{xi: best.xi, bench: probe, captain: best.captain}
+				cand := squad{xi: best.xi, bench: probe, captain: best.captain, vice: best.vice}
 				if clubOK(cand, players) && cand.cost(players) <= budget {
 					delete(squadSet, bidx)
 					squadSet[j] = true
@@ -466,7 +501,8 @@ func improve(players []cPlayer, s squad, budget float64, form formation) squad {
 				}
 				probe := append([]int{}, best.xi...)
 				probe[xi] = j
-				cand := squad{xi: probe, bench: best.bench, captain: pickCaptain(players, probe)}
+				capt, vc := pickCaptaincy(players, probe)
+				cand := squad{xi: probe, bench: best.bench, captain: capt, vice: vc}
 				if clubOK(cand, players) && cand.cost(players) <= budget {
 					if cand.score(players) > best.score(players) {
 						delete(squadSet, xidx)
@@ -507,6 +543,7 @@ type squadJSONPlayer struct {
 	GW1       float64   `json:"projected_gw1_points"`
 	ByGW      []float64 `json:"projected_by_gameweek"`
 	Captain   bool      `json:"captain"`
+	Vice      bool      `json:"vice_captain"`
 }
 
 // squadJSON is the machine-readable form of a selected squad.
@@ -517,7 +554,9 @@ type squadJSON struct {
 	Cost            float64           `json:"cost"`
 	Formation       string            `json:"formation"`
 	ProjectedPoints float64           `json:"projected_points"`
+	ProjectedGW1    float64           `json:"projected_gw1_points"`
 	CaptainID       int               `json:"captain_player_id"`
+	ViceCaptainID   int               `json:"vice_captain_player_id"`
 	XI              []squadJSONPlayer `json:"xi"`
 	Bench           []squadJSONPlayer `json:"bench"`
 }
@@ -527,7 +566,7 @@ func writeSquadJSON(path string, players []cPlayer, s squad, budget float64, sea
 		p := players[i]
 		return squadJSONPlayer{
 			PlayerID:  p.proj.PlayerID,
-			Name:      fmt.Sprintf("%s %s", p.proj.FirstName, p.proj.LastName),
+			Name:      playerName(p),
 			Position:  p.proj.Position,
 			TeamID:    p.teamID,
 			TeamName:  p.teamName,
@@ -536,6 +575,7 @@ func writeSquadJSON(path string, players []cPlayer, s squad, budget float64, sea
 			GW1:       p.gw1Points,
 			ByGW:      p.gwPoints,
 			Captain:   i == s.captain,
+			Vice:      i == s.vice,
 		}
 	}
 
@@ -558,7 +598,9 @@ func writeSquadJSON(path string, players []cPlayer, s squad, budget float64, sea
 		Cost:            s.cost(players),
 		Formation:       fmt.Sprintf("%d-%d-%d", defs, mids, fwds),
 		ProjectedPoints: s.score(players),
+		ProjectedGW1:    s.gw1Score(players),
 		CaptainID:       players[s.captain].proj.PlayerID,
+		ViceCaptainID:   players[s.vice].proj.PlayerID,
 	}
 	for _, i := range s.xi {
 		out.XI = append(out.XI, toJSON(i))
@@ -579,31 +621,31 @@ func writeSquadJSON(path string, players []cPlayer, s squad, budget float64, sea
 
 // printSquad renders the final squad.
 func printSquad(players []cPlayer, s squad, budget float64, gameweeks int) {
-	// Group XI by position.
-	type row struct {
-		name    string
-		team    string
-		pos     string
-		points  float64
-		price   float64
-		captain bool
-	}
-
 	order := []string{"GK", "DEF", "MID", "FWD"}
-	var xiRows []row
-	for _, pos := range order {
-		for _, i := range s.xi {
-			if players[i].proj.Position == pos {
-				xiRows = append(xiRows, row{
-					name:    fmt.Sprintf("%s %s", players[i].proj.FirstName, players[i].proj.LastName),
-					team:    players[i].teamName,
-					pos:     pos,
-					points:  players[i].adjPoints,
-					price:   players[i].price,
-					captain: i == s.captain,
-				})
+
+	const rowFmt = "  %-3s %-20s %-18s %6s %6s  %6s %s"
+	header := strings.TrimRight(fmt.Sprintf(rowFmt, "Pos", "Player", "Team", "Proj", "GW1", "Price", ""), " ")
+	rule := strings.TrimRight(fmt.Sprintf(rowFmt, "---", strings.Repeat("-", 20), strings.Repeat("-", 18),
+		"------", "------", "------", ""), " ")
+
+	rowFor := func(i int, mark bool) string {
+		flag := " "
+		if mark {
+			switch i {
+			case s.captain:
+				flag = "C"
+			case s.vice:
+				flag = "V"
 			}
 		}
+		return strings.TrimRight(fmt.Sprintf(rowFmt,
+			players[i].proj.Position,
+			truncate(playerName(players[i]), 20),
+			truncate(players[i].teamName, 18),
+			fmt.Sprintf("%.1f", players[i].adjPoints),
+			fmt.Sprintf("%.1f", players[i].gw1Points),
+			fmt.Sprintf("%.1fM", players[i].price),
+			flag), " ")
 	}
 
 	// Count formation for display.
@@ -620,46 +662,34 @@ func printSquad(players []cPlayer, s squad, budget float64, gameweeks int) {
 	}
 
 	fmt.Printf("Optimised for GW 1-%d | Budget: £%.1fM\n\n", gameweeks, budget)
-	fmt.Printf("Starting XI (%d-%d-%d)                        Proj   Price\n", defs, mids, fwds)
-	fmt.Println("---------------------------------------------- ------  ------")
-	for _, r := range xiRows {
-		name := r.name
-		if len(name) > 20 {
-			name = name[:20]
-		}
-		team := r.team
-		if len(team) > 18 {
-			team = team[:18]
-		}
-		capt := " "
-		if r.captain {
-			capt = "C"
-		}
-		fmt.Printf("  %-3s %-20s %-18s %6.1f  %5.1fM %s\n",
-			r.pos, name, team, r.points, r.price, capt)
-	}
 
-	fmt.Println("\nBench")
-	fmt.Println("---------------------------------------------- ------  ------")
+	fmt.Printf("Starting XI (%d-%d-%d)\n", defs, mids, fwds)
+	fmt.Println(header)
+	fmt.Println(rule)
 	for _, pos := range order {
-		for _, i := range s.bench {
+		for _, i := range s.xi {
 			if players[i].proj.Position == pos {
-				name := fmt.Sprintf("%s %s", players[i].proj.FirstName, players[i].proj.LastName)
-				if len(name) > 20 {
-					name = name[:20]
-				}
-				team := players[i].teamName
-				if len(team) > 18 {
-					team = team[:18]
-				}
-				fmt.Printf("  %-3s %-20s %-18s %6.1f  %5.1fM\n",
-					pos, name, team, players[i].adjPoints, players[i].price)
+				fmt.Println(rowFor(i, true))
 			}
 		}
 	}
 
-	total := s.cost(players)
-	fmt.Printf("\nSquad: £%.1fM / £%.1fM\n", total, budget)
+	fmt.Println("\nBench")
+	fmt.Println(header)
+	fmt.Println(rule)
+	for _, pos := range order {
+		for _, i := range s.bench {
+			if players[i].proj.Position == pos {
+				fmt.Println(rowFor(i, false))
+			}
+		}
+	}
+
+	fmt.Printf("\nSquad: £%.1fM / £%.1fM\n", s.cost(players), budget)
 	fmt.Printf("Projected XI pts (GW 1-%d): %.1f (incl. GW1 captain bonus: %.1f)\n",
 		gameweeks, s.score(players), players[s.captain].gw1Points)
+	fmt.Printf("Projected XI pts (GW1): %.1f (incl. captain bonus: %.1f)\n",
+		s.gw1Score(players), players[s.captain].gw1Points)
+	fmt.Printf("Captain: %s (%.1f)\n", playerName(players[s.captain]), players[s.captain].gw1Points)
+	fmt.Printf("Vice captain: %s (%.1f)\n", playerName(players[s.vice]), players[s.vice].gw1Points)
 }
