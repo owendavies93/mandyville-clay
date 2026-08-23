@@ -7,21 +7,23 @@
 package draft
 
 import (
-	"fmt"
-	"sort"
+	"github.com/mandyville/mandyville-draft/squad"
 )
 
-// Position constants, matching the engine's output.
+// Position constants and the shared squad types are re-exported from the
+// squad package so draft callers keep a single import.
 const (
-	PosGK  = "GK"
-	PosDEF = "DEF"
-	PosMID = "MID"
-	PosFWD = "FWD"
+	PosGK  = squad.PosGK
+	PosDEF = squad.PosDEF
+	PosMID = squad.PosMID
+	PosFWD = squad.PosFWD
 )
 
-// SquadShape is the fixed FPL Draft squad composition. Because it never
-// changes, every legal transfer is a same-position swap.
-var SquadShape = map[string]int{PosGK: 2, PosDEF: 5, PosMID: 5, PosFWD: 3}
+// SquadShape is the fixed FPL Draft squad composition.
+var SquadShape = squad.SquadShape
+
+// Player is a projectable player, re-exported from the squad package.
+type Player = squad.Player
 
 // League is a row from fpl_draft_leagues.
 type League struct {
@@ -72,57 +74,4 @@ type PickSlot struct {
 	Element    int
 	Position   int
 	IsStarting bool
-}
-
-// Player is a projectable player: identity, position and projected points
-// per gameweek, plus the engine's consistency metric for the H2H view.
-type Player struct {
-	ID          int
-	Name        string
-	Position    string
-	GWPoints    map[int]float64 // gameweek -> projected points
-	Consistency float64         // stddev of historic gameweek points
-}
-
-// pointsIn returns the player's projected points for a gameweek (0 if
-// unknown, e.g. a blank or an unprojected gameweek).
-func (p *Player) pointsIn(gw int) float64 {
-	if p.GWPoints == nil {
-		return 0
-	}
-	return p.GWPoints[gw]
-}
-
-// roster is a set of players that make up a squad, keyed by player id.
-type roster map[int]*Player
-
-// byPosition splits a roster into per-position slices sorted by points in
-// the given gameweek, descending.
-func (r roster) byPosition(gw int) map[string][]*Player {
-	out := map[string][]*Player{}
-	for _, p := range r {
-		out[p.Position] = append(out[p.Position], p)
-	}
-	for _, ps := range out {
-		sort.Slice(ps, func(i, j int) bool {
-			return ps[i].pointsIn(gw) > ps[j].pointsIn(gw)
-		})
-	}
-	return out
-}
-
-// validateShape reports whether a roster has the mandatory 2/5/5/3 shape.
-// Used as a guard before running the XI optimiser; a malformed squad is a
-// data problem the caller should surface, not crash on.
-func (r roster) validateShape() error {
-	counts := map[string]int{}
-	for _, p := range r {
-		counts[p.Position]++
-	}
-	for pos, want := range SquadShape {
-		if counts[pos] != want {
-			return fmt.Errorf("roster has %d %s players, want %d", counts[pos], pos, want)
-		}
-	}
-	return nil
 }
