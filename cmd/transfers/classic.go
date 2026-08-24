@@ -192,10 +192,14 @@ func memberName(m *classic.Member) string {
 	return fmt.Sprintf("element %d", m.Element)
 }
 
+func singleMoveString(m classic.Move) string {
+	return fmt.Sprintf("%s → %s (%s)", memberName(m.Out), m.In.Player.Name, m.Position)
+}
+
 func moveString(moves []classic.Move) string {
 	parts := make([]string, len(moves))
 	for i, m := range moves {
-		parts[i] = fmt.Sprintf("%s (%s) → %s (%s)", memberName(m.Out), m.Position, m.In.Player.Name, m.In.Player.Position)
+		parts[i] = singleMoveString(m)
 	}
 	return strings.Join(parts, "; ")
 }
@@ -321,6 +325,8 @@ func printClassicXI(step classic.Step, view *squadView, gw int) {
 				mark := ""
 				if id == step.Captain {
 					mark = " (C)"
+				} else if id == step.ViceCaptain {
+					mark = " (VC)"
 				}
 				names = append(names, view.name(id)+mark)
 			}
@@ -341,11 +347,18 @@ func printClassicPlan(plan *classic.Plan, startGW int) {
 	fmt.Println("Plan (projected points, hits included):")
 	fmt.Printf("  %-5s %-40s %5s %4s %7s\n", "GW", "Transfers", "FT", "Hits", "XI pts")
 	for _, s := range plan.Steps {
-		action := "roll"
-		if len(s.Moves) > 0 {
-			action = moveString(s.Moves)
+		if len(s.Moves) == 0 {
+			fmt.Printf("  GW%-3d %-40s %5d %4d %7.1f\n", s.GW, "roll", s.FreeUsed, s.Hits, s.Points)
+		} else {
+			for i, m := range s.Moves {
+				desc := singleMoveString(m)
+				if i == 0 {
+					fmt.Printf("  GW%-3d %-40s %5d %4d %7.1f\n", s.GW, desc, s.FreeUsed, s.Hits, s.Points)
+				} else {
+					fmt.Printf("  %-5s %-40s\n", "", desc)
+				}
+			}
 		}
-		fmt.Printf("  GW%-3d %-40s %5d %4d %7.1f\n", s.GW, truncate(action, 40), s.FreeUsed, s.Hits, s.Points)
 	}
 	fmt.Printf("  %-5s %-40s %5s %4s %7.1f\n\n", "", "", "", "", plan.Total)
 }
@@ -381,7 +394,8 @@ type classicJSONStep struct {
 	FreeUsed int                    `json:"free_transfers_used"`
 	Hits     int                    `json:"hits"`
 	Points   float64                `json:"projected_points"`
-	Captain  classicJSONPlayerRef   `json:"captain"`
+	Captain     classicJSONPlayerRef `json:"captain"`
+	ViceCaptain classicJSONPlayerRef `json:"vice_captain"`
 	XI       []classicJSONPlayerRef `json:"starting_xi"`
 	Bench    []classicJSONPlayerRef `json:"bench"`
 }
@@ -496,7 +510,8 @@ func jsonStep(s classic.Step, view *squadView) classicJSONStep {
 	js := classicJSONStep{
 		GW: s.GW, FreeUsed: s.FreeUsed, Hits: s.Hits,
 		Points:  s.Points,
-		Captain: classicJSONPlayerRef{PlayerID: s.Captain, Name: view.name(s.Captain), Position: view.pos(s.Captain)},
+		Captain:     classicJSONPlayerRef{PlayerID: s.Captain, Name: view.name(s.Captain), Position: view.pos(s.Captain)},
+		ViceCaptain: classicJSONPlayerRef{PlayerID: s.ViceCaptain, Name: view.name(s.ViceCaptain), Position: view.pos(s.ViceCaptain)},
 	}
 	for _, id := range s.XI {
 		js.XI = append(js.XI, classicJSONPlayerRef{PlayerID: id, Name: view.name(id), Position: view.pos(id)})

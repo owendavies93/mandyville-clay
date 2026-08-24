@@ -31,7 +31,8 @@ type Step struct {
 	Hits      int     // paid transfers
 	XI        []int   // starting player ids
 	Bench     []int   // bench player ids (in recommended order)
-	Captain   int     // player id
+	Captain     int // player id
+	ViceCaptain int // player id
 	Points    float64 // projected XI + captain points (gross)
 	NetPoints float64 // gross minus hit costs
 }
@@ -373,15 +374,17 @@ func (p *Planner) transition(s *state, moves []Move, gw int) *state {
 	}
 	hits := len(moves) - freeUsed
 
-	xi, captain, gross := squad.BestXIWithCaptain(ns.playersMap(), gw)
-	bench := squad.BenchOrder(ns.playersMap(), xi, gw)
+	pm := ns.playersMap()
+	xi, captain, gross := squad.BestXIWithCaptain(pm, gw)
+	vice := viceCaptain(pm, xi, captain, gw)
+	bench := squad.BenchOrder(pm, xi, gw)
 	net := gross - 4*float64(hits)
 
 	ns.ft -= freeUsed
 	ns.pts += net
 	step := Step{
 		GW: gw, Moves: moves, FreeUsed: freeUsed, Hits: hits,
-		XI: xi, Bench: bench, Captain: captain,
+		XI: xi, Bench: bench, Captain: captain, ViceCaptain: vice,
 		Points: gross, NetPoints: net,
 	}
 	ns.steps = append(ns.steps, step)
@@ -580,4 +583,23 @@ func (p *Planner) ThisWeekSingles(sq *Squad) []Move {
 	}
 	sort.Slice(moves, func(i, j int) bool { return moves[i].Gain > moves[j].Gain })
 	return moves
+}
+
+// viceCaptain returns the highest-projected XI player after the captain.
+func viceCaptain(players map[int]*squad.Player, xi []int, captain, gw int) int {
+	vice := 0
+	best := -1.0
+	for _, id := range xi {
+		if id == captain {
+			continue
+		}
+		if p := players[id].PointsIn(gw); p > best {
+			best = p
+			vice = id
+		}
+	}
+	if vice == 0 {
+		vice = captain
+	}
+	return vice
 }
