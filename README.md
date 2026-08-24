@@ -2,6 +2,7 @@
 
 - Projection Modelling
 - TUI for draft selection
+- Classic and draft transfer recommendation
 - Classic squad selection tooling
 
 ## Prerequisites
@@ -31,17 +32,63 @@ Flags:
 ## Backtests
 
 ```
-go run ./cmd/backtest/ -season 2025           # pre-season projection vs actuals
-go run ./cmd/backtest/ -season 2025 -rolling  # rolling in-season backtest
-go run ./cmd/backtest/ -grade-recommendations # score logged transfer advice
+go run ./cmd/backtest/ -season 2025                 # pre-season projection vs actuals
+go run ./cmd/backtest/ -season 2025 -rolling        # rolling in-season backtest
+go run ./cmd/backtest/ -grade-recommendations       # score logged draft transfer advice
+go run ./cmd/backtest/ -classic-sim -season 2025    # rolling classic season simulator
 ```
 
-Flags: `-season` (default 2025), `-rolling`, `-grade-recommendations`, `-league-size`, `-config`, `-db-*`.
+Flags: `-season` (default 2025), `-rolling`, `-grade-recommendations`,
+`-classic-sim`, `-sim-beam`, `-sim-horizon`, `-sim-min-gain`, `-refresh`,
+`-league-size`, `-config`, `-db-*`.
+
+## Classic Transfers
+
+```
+go run ./cmd/transfers/ -season 2026
+```
+
+Plans the budget-constrained transfer sequence for the classic game over a
+multi-gameweek horizon and recommends this week's move (transfer or roll),
+the starting XI, bench order and captain. The planner is a beam search over
+`squad × bank × free transfers` states: each gameweek it considers rolling,
+every feasible single transfer, and two-transfer combinations (including
+hits), scoring every option with the optimised XI plus captain doubling.
+
+The squad, bank and free transfers are reconstructed from the
+`fpl_classic_*` tables (`update-fpl-classic` in the data repo). Current
+prices come from `fpl_player_prices` (written by `update-fpl-info`),
+falling back to starting/last-gameweek prices with a warning when the table
+has no rows yet.
+
+Flags:
+
+| Flag | Default | Description |
+|---|---|---|
+| `-game` | classic | Game to advise: `classic` or `draft` |
+| `-entry` | — | Override the classic entry id (`is_mine` row by default) |
+| `-season` | 2026 | Season |
+| `-horizon` | 8 | Gameweeks to plan ahead (draft defaults to 3) |
+| `-beam` | 200 | Beam width for the planner |
+| `-max-transfers` | 2 | Max transfers considered per gameweek |
+| `-pair-shortlist` | 30 | Top single moves to combine into pairs |
+| `-min-gain` | 2.0 | Minimum gain over rolling to recommend acting |
+| `-bank` | — | Override the reconstructed bank (tenths of £1m) |
+| `-free-transfers` | — | Override the reconstructed free transfers |
+| `-persist` | true | Persist the projection snapshot for reproducibility |
+| `-json` | — | Write the full plan to this file as JSON |
+| `-input` | — | Reuse a `projections.json` instead of computing in-process |
+| `-no-log` | false | Skip writing recommendations to the database |
+| `-config`, `-db-*` | — | Database connection (same as `cmd/project`) |
+
+Classic recommendations are logged to `fpl_classic_recommendation_runs`/
+`fpl_classic_recommendations` (unless `-no-log`), including the projected
+XI, captain and bench for every gameweek of the plan.
 
 ## Draft Transfers
 
 ```
-go run ./cmd/transfers/ -league 12345 -season 2026
+go run ./cmd/transfers/ -game draft -league 12345 -season 2026
 ```
 
 Recommends same-position transfers, waiver claims and the starting XI for
@@ -54,7 +101,8 @@ Flags:
 
 | Flag | Default | Description |
 |---|---|---|
-| `-league` | — | FPL draft league id (required) |
+| `-game` | classic | Set to `draft` for draft recommendations |
+| `-league` | — | FPL draft league id (required in draft mode) |
 | `-season` | 2026 | Season |
 | `-horizon` | 3 | Gameweeks to project ahead |
 | `-discount` | 0.9 | Geometric per-gameweek discount |
