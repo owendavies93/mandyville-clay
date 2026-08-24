@@ -1,5 +1,26 @@
 # Projection Model Performance
 
+## Classic transfer planner simulation (2025 season)
+
+The classic planner (`cmd/transfers -game classic`) was validated with a
+rolling season simulator (`cmd/backtest -classic-sim -season 2025`): each
+strategy starts from the same greedy opening squad on pre-season projections
+and £100.0m, re-decides transfers every gameweek using only point-in-time
+projections and prices, and scores with actual FPL points (including
+captain doubling, full autosub rules and hits).
+
+| Strategy | Points | Δ vs never | Transfers | Hits | Final squad |
+|---|---|---|---|---|---|
+| never-transfer | 1509 | — | 0 | 0 | £98.7m |
+| greedy-1ft | 1659 | +150 | 7 | 0 | £98.3m |
+| **planner** | **1853** | **+344** | 36 | 1 | £118.2m |
+
+The multi-week beam planner beats the best-single-free-transfer greedy by
++194 points and never transferring by +344 over a full season, while only
+taking one hit. `-sim-beam`/`-sim-horizon` tune the simulator's planner;
+results are cached under `out/sim-projections/` and written to
+`out/classic-sim-2025.json`.
+
 ## Fixture-level & in-season model (2025-08)
 
 The engine now projects per fixture (opponent difficulty, blanks, doubles) and

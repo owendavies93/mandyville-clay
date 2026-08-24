@@ -17,6 +17,11 @@ func main() {
 	leagueSize := flag.Int("league-size", 8, "number of managers in draft league")
 	rolling := flag.Bool("rolling", false, "run the rolling in-season backtest")
 	grade := flag.Bool("grade-recommendations", false, "grade logged transfer recommendations against actual points")
+	classicSim := flag.Bool("classic-sim", false, "run the rolling classic season simulator")
+	simBeam := flag.Int("sim-beam", 50, "beam width for the classic simulator planner")
+	simHorizon := flag.Int("sim-horizon", 6, "planning horizon for the classic simulator planner")
+	simMinGain := flag.Float64("sim-min-gain", 2.0, "minimum gain to act in the classic simulator")
+	refresh := flag.Bool("refresh", false, "regenerate the simulator projection cache")
 	configFile := flag.String("config", "", "path to mandyville config.yaml")
 	dbHost := flag.String("db-host", "", "database host")
 	dbPort := flag.Int("db-port", 0, "database port")
@@ -70,6 +75,11 @@ func main() {
 
 	if *grade {
 		gradeRecommendations(db)
+		return
+	}
+
+	if *classicSim {
+		runClassicSim(db, *season, *simBeam, *simHorizon, *simMinGain, *refresh)
 		return
 	}
 

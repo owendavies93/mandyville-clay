@@ -1,6 +1,7 @@
-// Command transfers recommends FPL Draft transfers, waiver claims and the
-// starting XI for the upcoming gameweek, based on the current league state
-// in the database and fixture-level projections.
+// Command transfers recommends FPL transfers for the classic and draft
+// games. Classic mode plans a budget-constrained transfer sequence over a
+// multi-gameweek horizon; draft mode recommends same-position swaps, waiver
+// claims and the starting XI from the current league state.
 package main
 
 import (
@@ -15,16 +16,25 @@ import (
 
 	"github.com/mandyville/mandyville-draft/draft"
 	"github.com/mandyville/mandyville-draft/projection"
+	"github.com/mandyville/mandyville-draft/squad"
 )
 
 func main() {
-	leagueID := flag.Int("league", 0, "FPL draft league id (required)")
+	game := flag.String("game", "classic", "game to advise: classic or draft")
+	leagueID := flag.Int("league", 0, "FPL draft league id (draft only)")
+	entryID := flag.Int("entry", 0, "FPL classic entry id override (classic only)")
 	season := flag.Int("season", 2026, "season")
-	horizon := flag.Int("horizon", 3, "number of gameweeks to project ahead")
-	discount := flag.Float64("discount", 0.9, "per-gameweek discount applied to later gameweeks")
-	top := flag.Int("top", 10, "number of candidates to show")
-	minGain := flag.Float64("min-gain", 1.0, "minimum discounted XI gain to recommend a swap")
-	jsonOut := flag.String("json", "", "write the full candidate set to this file as JSON")
+	horizon := flag.Int("horizon", 0, "number of gameweeks to project ahead (0 = game default: classic 8, draft 3)")
+	discount := flag.Float64("discount", 0.9, "per-gameweek discount applied to later gameweeks (draft only)")
+	top := flag.Int("top", 10, "number of candidates to show (draft)")
+	minGain := flag.Float64("min-gain", 0, "minimum gain over rolling to recommend acting (0 = game default: classic 2.0, draft 1.0)")
+	beam := flag.Int("beam", 200, "beam width for the classic planner")
+	maxTransfers := flag.Int("max-transfers", 2, "max transfers considered per gameweek (classic)")
+	pairShortlist := flag.Int("pair-shortlist", 30, "top single moves to pair up (classic)")
+	bankOverride := flag.Int("bank", -1, "override the reconstructed bank in tenths (classic)")
+	ftOverride := flag.Int("free-transfers", -1, "override the reconstructed free transfers (classic)")
+	persist := flag.Bool("persist", true, "persist the projection snapshot for reproducibility (classic)")
+	jsonOut := flag.String("json", "", "write the full output to this file as JSON")
 	input := flag.String("input", "", "reuse a projections JSON file instead of computing in-process")
 	noLog := flag.Bool("no-log", false, "do not write recommendations to the database")
 	configFile := flag.String("config", "", "path to mandyville config.yaml")
@@ -35,13 +45,32 @@ func main() {
 	dbName := flag.String("db-name", "", "database name")
 	flag.Parse()
 
-	if *leagueID == 0 {
-		fmt.Fprintln(os.Stderr, "-league is required")
+	if *game != "classic" && *game != "draft" {
+		fmt.Fprintln(os.Stderr, "-game must be classic or draft")
 		os.Exit(1)
 	}
-	if *horizon < 1 {
-		fmt.Fprintln(os.Stderr, "-horizon must be at least 1")
+	if *game == "draft" && *leagueID == 0 {
+		fmt.Fprintln(os.Stderr, "-league is required for draft mode")
 		os.Exit(1)
+	}
+	if *horizon < 0 {
+		fmt.Fprintln(os.Stderr, "-horizon must be at least 0")
+		os.Exit(1)
+	}
+
+	if *horizon == 0 {
+		if *game == "draft" {
+			*horizon = 3
+		} else {
+			*horizon = 8
+		}
+	}
+	if *minGain == 0 {
+		if *game == "draft" {
+			*minGain = 1.0
+		} else {
+			*minGain = 2.0
+		}
 	}
 
 	cfg := resolveConfig(*configFile, dbHost, dbPort, dbUser, dbPass, dbName, false)
@@ -62,7 +91,28 @@ func main() {
 		writeCfg = &w
 	}
 
-	if err := run(db, writeCfg, *leagueID, *season, *horizon, *top, *discount, *minGain, *jsonOut, *input); err != nil {
+	if *game == "draft" {
+		if err := runDraft(db, writeCfg, *leagueID, *season, *horizon, *top, *discount, *minGain, *jsonOut, *input); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if err := runClassic(db, writeCfg, classicArgs{
+		season:        *season,
+		entry:         *entryID,
+		horizon:       *horizon,
+		beam:          *beam,
+		maxTransfers:  *maxTransfers,
+		pairShortlist: *pairShortlist,
+		minGain:       *minGain,
+		bank:          *bankOverride,
+		freeTransfers: *ftOverride,
+		jsonOut:       *jsonOut,
+		input:         *input,
+		persist:       *persist,
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -106,7 +156,7 @@ func resolveConfig(configFile string, dbHost *string, dbPort *int, dbUser, dbPas
 	return cfg
 }
 
-func run(db *sql.DB, writeCfg *projection.DBConfig, leagueID, season, horizon, top int, discount, minGain float64, jsonOut, input string) error {
+func runDraft(db *sql.DB, writeCfg *projection.DBConfig, leagueID, season, horizon, top int, discount, minGain float64, jsonOut, input string) error {
 	league, err := findLeague(db, season, leagueID)
 	if err != nil {
 		return err
@@ -131,11 +181,11 @@ func run(db *sql.DB, writeCfg *projection.DBConfig, leagueID, season, horizon, t
 		return err
 	}
 
-	output, err := loadProjections(db, input, season, len(entries), startGW)
+	output, err := loadProjections(db, input, season, len(entries), projection.DraftRules, startGW)
 	if err != nil {
 		return err
 	}
-	pool := toDraftPlayers(output)
+	pool := toPlayers(output)
 
 	elementByPlayer := map[int]int{}
 	myRoster := map[int]*draft.Player{}
@@ -296,7 +346,7 @@ func upcomingGameweek(db *sql.DB, season int) (int, error) {
 
 // loadProjections computes projections in-process, or loads them from a
 // JSON file if one is given.
-func loadProjections(db *sql.DB, input string, season, leagueSize, startGW int) (*projection.ProjectionOutput, error) {
+func loadProjections(db *sql.DB, input string, season, leagueSize int, rules projection.ScoringRules, startGW int) (*projection.ProjectionOutput, error) {
 	if input != "" {
 		f, err := os.Open(input)
 		if err != nil {
@@ -314,7 +364,7 @@ func loadProjections(db *sql.DB, input string, season, leagueSize, startGW int) 
 	}
 
 	engine := projection.NewEngine(db, season, leagueSize)
-	engine.Rules = projection.DraftRules
+	engine.Rules = rules
 	out, err := engine.RunInSeason(startGW)
 	if err != nil {
 		return nil, fmt.Errorf("projection failed: %w", err)
@@ -322,17 +372,17 @@ func loadProjections(db *sql.DB, input string, season, leagueSize, startGW int) 
 	return out, nil
 }
 
-// toDraftPlayers converts a projection output into draft.Player values
-// keyed by player id, summing per-gameweek points across fixtures.
-func toDraftPlayers(out *projection.ProjectionOutput) map[int]*draft.Player {
-	pool := make(map[int]*draft.Player, len(out.Players))
+// toPlayers converts a projection output into squad.Player values keyed by
+// player id, summing per-gameweek points across fixtures.
+func toPlayers(out *projection.ProjectionOutput) map[int]*squad.Player {
+	pool := make(map[int]*squad.Player, len(out.Players))
 	for i := range out.Players {
 		p := &out.Players[i]
 		gw := map[int]float64{}
 		for _, fx := range p.Gameweeks {
 			gw[fx.Gameweek] += fx.ProjectedPoints
 		}
-		pool[p.PlayerID] = &draft.Player{
+		pool[p.PlayerID] = &squad.Player{
 			ID:          p.PlayerID,
 			Name:        strings.TrimSpace(p.FirstName + " " + p.LastName),
 			Position:    p.Position,

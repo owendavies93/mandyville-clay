@@ -3,6 +3,8 @@ package draft
 import (
 	"math"
 	"testing"
+
+	"github.com/mandyville/mandyville-draft/squad"
 )
 
 // p is a test helper: a player with the same points value in gameweeks
@@ -189,12 +191,12 @@ func TestH2HGain(t *testing.T) {
 
 func TestRosterValidateShape(t *testing.T) {
 	valid := makeSquad(nil, 0)
-	if err := roster(valid).validateShape(); err != nil {
+	if err := squad.ValidateShape(valid); err != nil {
 		t.Fatalf("valid roster failed validation: %v", err)
 	}
 
 	delete(valid, 14) // remove a defender
-	if err := roster(valid).validateShape(); err == nil {
+	if err := squad.ValidateShape(valid); err == nil {
 		t.Fatal("malformed roster passed validation")
 	}
 }
