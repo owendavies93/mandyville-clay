@@ -52,7 +52,11 @@ func (r roster) byPosition(gw int) map[string][]*Player {
 	}
 	for _, ps := range out {
 		sort.Slice(ps, func(i, j int) bool {
-			return ps[i].PointsIn(gw) > ps[j].PointsIn(gw)
+			pi, pj := ps[i].PointsIn(gw), ps[j].PointsIn(gw)
+			if pi != pj {
+				return pi > pj
+			}
+			return ps[i].ID < ps[j].ID
 		})
 	}
 	return out

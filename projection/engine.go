@@ -282,14 +282,17 @@ func (e *Engine) loadPrior() ([]Player, error) {
 // computeLeagueAvgOff recomputes the league-average offensive rating used
 // for the team-context adjustment.
 func (e *Engine) computeLeagueAvgOff() {
-	var totalOff float64
-	var teamCount int
-	for _, ts := range e.TeamStrengths {
-		totalOff += ts.OffensiveRating
-		teamCount++
+	ids := make([]int, 0, len(e.TeamStrengths))
+	for id := range e.TeamStrengths {
+		ids = append(ids, id)
 	}
-	if teamCount > 0 {
-		e.leagueAvgOffRating = totalOff / float64(teamCount)
+	sort.Ints(ids)
+	var totalOff float64
+	for _, id := range ids {
+		totalOff += e.TeamStrengths[id].OffensiveRating
+	}
+	if len(ids) > 0 {
+		e.leagueAvgOffRating = totalOff / float64(len(ids))
 	} else {
 		e.leagueAvgOffRating = 0
 	}
@@ -867,10 +870,10 @@ func (e *Engine) computeRates(p *Player, fixtures []playerFixtureRow) {
 		}
 	}
 
-	// Find primary detailed position.
+	// Find primary detailed position (deterministic tiebreak on name).
 	var maxPosCount int
 	for pos, count := range posCount {
-		if count > maxPosCount {
+		if count > maxPosCount || (count == maxPosCount && pos < p.PrimaryDetailedPos) {
 			maxPosCount = count
 			p.PrimaryDetailedPos = pos
 		}

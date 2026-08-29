@@ -1,6 +1,9 @@
 package projection
 
-import "math"
+import (
+	"math"
+	"sort"
+)
 
 // FixtureDifficulty holds the attacking and defensive difficulty scaling
 // factors for a set of fixtures. Values > 1 mean an easier-than-average
@@ -24,14 +27,20 @@ func FixtureMultipliers(fixtures []TeamFixture, strengths map[int]*TeamStrength)
 		return FixtureDifficulty{Attack: 1.0, Defense: 1.0}
 	}
 
-	// League averages from the strengths map.
+	// League averages from the strengths map. Sum in deterministic
+	// (team-id-sorted) order so floating-point rounding is reproducible.
+	ids := make([]int, 0, len(strengths))
+	for id := range strengths {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
 	var leagueAvgOff, leagueAvgGC float64
-	var n int
-	for _, ts := range strengths {
+	for _, id := range ids {
+		ts := strengths[id]
 		leagueAvgOff += ts.OffensiveRating
 		leagueAvgGC += ts.GoalsConcededPerMatch
-		n++
 	}
+	n := len(ids)
 	if n == 0 || leagueAvgOff == 0 || leagueAvgGC == 0 {
 		return FixtureDifficulty{Attack: 1.0, Defense: 1.0}
 	}

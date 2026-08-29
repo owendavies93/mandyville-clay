@@ -323,7 +323,15 @@ func buildTeamStrengths(rows *sql.Rows, db *sql.DB) (map[int]*TeamStrength, erro
 
 	teamSeasons := make(map[int]map[int]*teamSeasonAgg) // teamID -> season -> agg
 
-	for _, perfs := range fixtureData {
+	// Iterate fixtures in deterministic order so floating-point
+	// accumulations produce identical results across runs.
+	fixtureIDs := make([]int, 0, len(fixtureData))
+	for id := range fixtureData {
+		fixtureIDs = append(fixtureIDs, id)
+	}
+	sort.Ints(fixtureIDs)
+	for _, fid := range fixtureIDs {
+		perfs := fixtureData[fid]
 		if len(perfs) != 2 {
 			continue // need both teams
 		}
