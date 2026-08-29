@@ -69,7 +69,7 @@ Flags:
 | `-entry` | — | Override the classic entry id (`is_mine` row by default) |
 | `-season` | 2026 | Season |
 | `-horizon` | 8 | Gameweeks to plan ahead (draft defaults to 3) |
-| `-beam` | 200 | Beam width for the planner |
+| `-beam` | 200 | Beam width (effective cap is up to 2× this to preserve alternatives) |
 | `-max-transfers` | 2 | Max transfers considered per gameweek |
 | `-pair-shortlist` | 30 | Top single moves to combine into pairs |
 | `-min-gain` | 2.0 | Minimum gain over rolling to recommend acting |

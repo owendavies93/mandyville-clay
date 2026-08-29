@@ -28,7 +28,7 @@ func main() {
 	discount := flag.Float64("discount", 0.9, "per-gameweek discount applied to later gameweeks (draft only)")
 	top := flag.Int("top", 10, "number of candidates to show (draft)")
 	minGain := flag.Float64("min-gain", 0, "minimum gain over rolling to recommend acting (0 = game default: classic 2.0, draft 1.0)")
-	beam := flag.Int("beam", 200, "beam width for the classic planner")
+	beam := flag.Int("beam", 200, "beam width (effective cap up to 2x to preserve alternatives)")
 	maxTransfers := flag.Int("max-transfers", 2, "max transfers considered per gameweek (classic)")
 	pairShortlist := flag.Int("pair-shortlist", 30, "top single moves to pair up (classic)")
 	bankOverride := flag.Int("bank", -1, "override the reconstructed bank in tenths (classic)")

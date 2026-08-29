@@ -453,8 +453,9 @@ func prune(states []*state, beamWidth int) []*state {
 		}
 	}
 
-	// Deterministically pick the best state per action, limited to an extra
-	// beamWidth slots so the beam never exceeds 2*beamWidth.
+	// Force-keep the best state per distinct immediate action so the roll
+	// baseline and alternatives survive pruning. This can grow the beam up
+	// to 2*beamWidth when many actions exist.
 	byAction := make([]*state, 0, len(bestByAction))
 	for _, s := range bestByAction {
 		byAction = append(byAction, s)
