@@ -101,7 +101,8 @@ func BestXIWithCaptain(players map[int]*Player, gw int) (xi []int, captain int, 
 	captain = xi[0]
 	best := players[captain].PointsIn(gw)
 	for _, id := range xi[1:] {
-		if p := players[id].PointsIn(gw); p > best {
+		p := players[id].PointsIn(gw)
+		if p > best || (p == best && id < captain) {
 			best, captain = p, id
 		}
 	}
@@ -131,7 +132,11 @@ func BenchOrder(players map[int]*Player, xi []int, gw int) []int {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
-		return players[out[i]].PointsIn(gw) > players[out[j]].PointsIn(gw)
+		pi, pj := players[out[i]].PointsIn(gw), players[out[j]].PointsIn(gw)
+		if pi != pj {
+			return pi > pj
+		}
+		return out[i] < out[j]
 	})
 	return append(gk, out...)
 }

@@ -389,15 +389,15 @@ type classicJSONMove struct {
 }
 
 type classicJSONStep struct {
-	GW       int                    `json:"gameweek"`
-	Moves    []classicJSONMove      `json:"moves"`
-	FreeUsed int                    `json:"free_transfers_used"`
-	Hits     int                    `json:"hits"`
-	Points   float64                `json:"projected_points"`
-	Captain     classicJSONPlayerRef `json:"captain"`
-	ViceCaptain classicJSONPlayerRef `json:"vice_captain"`
-	XI       []classicJSONPlayerRef `json:"starting_xi"`
-	Bench    []classicJSONPlayerRef `json:"bench"`
+	GW          int                    `json:"gameweek"`
+	Moves       []classicJSONMove      `json:"moves"`
+	FreeUsed    int                    `json:"free_transfers_used"`
+	Hits        int                    `json:"hits"`
+	Points      float64                `json:"projected_points"`
+	Captain     classicJSONPlayerRef   `json:"captain"`
+	ViceCaptain classicJSONPlayerRef   `json:"vice_captain"`
+	XI          []classicJSONPlayerRef `json:"starting_xi"`
+	Bench       []classicJSONPlayerRef `json:"bench"`
 }
 
 type classicJSONPlayerRef struct {
@@ -509,7 +509,7 @@ func writeClassicJSON(path string, entry *classic.Entry, squad *classic.Squad, v
 func jsonStep(s classic.Step, view *squadView) classicJSONStep {
 	js := classicJSONStep{
 		GW: s.GW, FreeUsed: s.FreeUsed, Hits: s.Hits,
-		Points:  s.Points,
+		Points:      s.Points,
 		Captain:     classicJSONPlayerRef{PlayerID: s.Captain, Name: view.name(s.Captain), Position: view.pos(s.Captain)},
 		ViceCaptain: classicJSONPlayerRef{PlayerID: s.ViceCaptain, Name: view.name(s.ViceCaptain), Position: view.pos(s.ViceCaptain)},
 	}

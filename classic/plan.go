@@ -25,16 +25,16 @@ type Move struct {
 
 // Step is one gameweek of a plan.
 type Step struct {
-	GW        int
-	Moves     []Move
-	FreeUsed  int     // free transfers consumed
-	Hits      int     // paid transfers
-	XI        []int   // starting player ids
-	Bench     []int   // bench player ids (in recommended order)
-	Captain     int // player id
-	ViceCaptain int // player id
-	Points    float64 // projected XI + captain points (gross)
-	NetPoints float64 // gross minus hit costs
+	GW          int
+	Moves       []Move
+	FreeUsed    int     // free transfers consumed
+	Hits        int     // paid transfers
+	XI          []int   // starting player ids
+	Bench       []int   // bench player ids (in recommended order)
+	Captain     int     // player id
+	ViceCaptain int     // player id
+	Points      float64 // projected XI + captain points (gross)
+	NetPoints   float64 // gross minus hit costs
 }
 
 // Plan is a transfer plan over the horizon.
@@ -143,6 +143,11 @@ func dominates(a, b *PoolPlayer, startGW, horizon int) bool {
 // preserves every player that is strictly best in at least one gameweek or
 // uniquely cheap, so no genuinely useful option is removed.
 func paretoFrontier(cands []*PoolPlayer, startGW, horizon int) []*PoolPlayer {
+	// Sort by element so the frontier is deterministic regardless of map
+	// iteration order (the one-pass filter is order-dependent).
+	sort.Slice(cands, func(i, j int) bool {
+		return cands[i].Element < cands[j].Element
+	})
 	out := make([]*PoolPlayer, 0, len(cands))
 	for _, c := range cands {
 		dominated := false
@@ -279,7 +284,12 @@ func (p *Planner) generateSingles(s *state) []Move {
 			})
 		}
 	}
-	sort.Slice(moves, func(i, j int) bool { return moves[i].Rank > moves[j].Rank })
+	sort.Slice(moves, func(i, j int) bool {
+		if moves[i].Rank != moves[j].Rank {
+			return moves[i].Rank > moves[j].Rank
+		}
+		return moves[i].InElement < moves[j].InElement
+	})
 	return moves
 }
 
@@ -416,7 +426,12 @@ func prune(states []*state, beamWidth int) []*state {
 	for _, s := range dedup {
 		all = append(all, s)
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].pts > all[j].pts })
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].pts != all[j].pts {
+			return all[i].pts > all[j].pts
+		}
+		return all[i].key() < all[j].key()
+	})
 
 	keep := map[*state]bool{}
 	var kept []*state
@@ -444,7 +459,12 @@ func prune(states []*state, beamWidth int) []*state {
 	for _, s := range bestByAction {
 		byAction = append(byAction, s)
 	}
-	sort.Slice(byAction, func(i, j int) bool { return byAction[i].pts > byAction[j].pts })
+	sort.Slice(byAction, func(i, j int) bool {
+		if byAction[i].pts != byAction[j].pts {
+			return byAction[i].pts > byAction[j].pts
+		}
+		return byAction[i].key() < byAction[j].key()
+	})
 	for _, s := range byAction {
 		if len(kept) >= 2*beamWidth {
 			break
@@ -539,7 +559,11 @@ func (p *Planner) Plan(squad *Squad) (*Outcome, error) {
 		altKeys = append(altKeys, k)
 	}
 	sort.Slice(altKeys, func(i, j int) bool {
-		return byAction[altKeys[i]].pts > byAction[altKeys[j]].pts
+		pi, pj := byAction[altKeys[i]].pts, byAction[altKeys[j]].pts
+		if pi != pj {
+			return pi > pj
+		}
+		return altKeys[i] < altKeys[j]
 	})
 	for _, k := range altKeys {
 		if len(out.Alternatives) >= 3 {
@@ -593,7 +617,7 @@ func viceCaptain(players map[int]*squad.Player, xi []int, captain, gw int) int {
 		if id == captain {
 			continue
 		}
-		if p := players[id].PointsIn(gw); p > best {
+		if p := players[id].PointsIn(gw); p > best || (p == best && id < vice) {
 			best = p
 			vice = id
 		}
