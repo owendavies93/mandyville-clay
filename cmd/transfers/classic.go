@@ -204,9 +204,9 @@ func moveString(moves []classic.Move) string {
 	return strings.Join(parts, "; ")
 }
 
-// squadValue returns the total current value of the squad plus bank.
+// squadValue returns the total current selling price of the squad (excludes bank).
 func squadValue(squad *classic.Squad) int {
-	total := squad.Bank
+	total := 0
 	for _, m := range squad.Members {
 		total += m.CurrentPrice
 	}
