@@ -217,16 +217,18 @@ func squadValue(squad *classic.Squad) int {
 // whole pool plus the current squad, so bought players can be displayed as
 // readily as original squad members.
 type squadView struct {
-	nameByID map[int]string
-	posByID  map[int]string
-	teamByID map[int]string
+	nameByID   map[int]string
+	posByID    map[int]string
+	teamByID   map[int]string
+	playerByID map[int]*squadpkg.Player
 }
 
 func buildView(pool *classic.Pool, squad *classic.Squad) *squadView {
 	v := &squadView{
-		nameByID: map[int]string{},
-		posByID:  map[int]string{},
-		teamByID: map[int]string{},
+		nameByID:   map[int]string{},
+		posByID:    map[int]string{},
+		teamByID:   map[int]string{},
+		playerByID: map[int]*squadpkg.Player{},
 	}
 	for _, pp := range pool.ByElement {
 		if pp.Player == nil {
@@ -235,6 +237,7 @@ func buildView(pool *classic.Pool, squad *classic.Squad) *squadView {
 		v.nameByID[pp.PlayerID] = pp.Player.Name
 		v.posByID[pp.PlayerID] = pp.Player.Position
 		v.teamByID[pp.PlayerID] = pp.TeamName
+		v.playerByID[pp.PlayerID] = pp.Player
 	}
 	for _, m := range squad.Members {
 		if m.PlayerID == 0 {
@@ -245,6 +248,9 @@ func buildView(pool *classic.Pool, squad *classic.Squad) *squadView {
 		}
 		if m.Position != "" {
 			v.posByID[m.PlayerID] = m.Position
+		}
+		if m.Player != nil {
+			v.playerByID[m.PlayerID] = m.Player
 		}
 	}
 	return v
@@ -259,6 +265,13 @@ func (v *squadView) name(id int) string {
 
 func (v *squadView) pos(id int) string {
 	return v.posByID[id]
+}
+
+func (v *squadView) pts(id, gw int) float64 {
+	if p, ok := v.playerByID[id]; ok {
+		return p.PointsIn(gw)
+	}
+	return 0
 }
 
 func printClassic(entry *classic.Entry, squad *classic.Squad, view *squadView, outcome *classic.Outcome, candidates []classic.Move, startGW, horizon int, minGain float64) {
@@ -328,7 +341,7 @@ func printClassicXI(step classic.Step, view *squadView, gw int) {
 				} else if id == step.ViceCaptain {
 					mark = " (VC)"
 				}
-				names = append(names, view.name(id)+mark)
+				names = append(names, fmt.Sprintf("%s%s (%.1f)", view.name(id), mark, view.pts(id, gw)))
 			}
 		}
 		if len(names) > 0 {
@@ -338,7 +351,7 @@ func printClassicXI(step classic.Step, view *squadView, gw int) {
 
 	var bench []string
 	for _, id := range step.Bench {
-		bench = append(bench, view.name(id))
+		bench = append(bench, fmt.Sprintf("%s (%.1f)", view.name(id), view.pts(id, gw)))
 	}
 	fmt.Printf("  Bench: %s\n\n", strings.Join(bench, ", "))
 }
