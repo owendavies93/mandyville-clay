@@ -294,8 +294,11 @@ func (p *Planner) generateSingles(s *state) []Move {
 }
 
 // clubOK reports whether selling element `out` and buying candidate `c`
-// keeps every club at three or fewer players. Unmatched members (team 0)
-// are not counted.
+// keeps every club at three or fewer players. When the starting roster
+// already violates the limit (e.g. a player transferred between clubs
+// mid-season), every club must be ≤ 3 after the move — the real FPL game
+// blocks all transfers that don't fix the violation. Unmatched members
+// (team 0) are not counted.
 func clubOK(roster map[int]*Member, out int, c *PoolPlayer) bool {
 	counts := map[int]int{}
 	for e, m := range roster {
@@ -305,7 +308,12 @@ func clubOK(roster map[int]*Member, out int, c *PoolPlayer) bool {
 		counts[m.TeamID]++
 	}
 	counts[c.TeamID]++
-	return counts[c.TeamID] <= 3
+	for _, n := range counts {
+		if n > 3 {
+			return false
+		}
+	}
+	return true
 }
 
 // generatePairs combines the top shortlist of single moves into two-transfer
@@ -337,8 +345,7 @@ func (p *Planner) generatePairs(singles []Move, s *state) [][]Move {
 }
 
 // pairClubOK checks the 3-per-club constraint after applying both moves
-// simultaneously (two buys from the same club could individually pass but
-// jointly exceed the limit).
+// simultaneously. Every club in the resulting roster must be ≤ 3.
 func pairClubOK(roster map[int]*Member, a, b Move) bool {
 	counts := map[int]int{}
 	for e, m := range roster {
@@ -349,7 +356,12 @@ func pairClubOK(roster map[int]*Member, a, b Move) bool {
 	}
 	counts[a.In.TeamID]++
 	counts[b.In.TeamID]++
-	return counts[a.In.TeamID] <= 3 && counts[b.In.TeamID] <= 3
+	for _, n := range counts {
+		if n > 3 {
+			return false
+		}
+	}
+	return true
 }
 
 // expand generates the next-generation states from s for gameweek gw.

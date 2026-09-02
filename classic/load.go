@@ -536,7 +536,7 @@ func LoadSquad(db *sql.DB, entry *Entry, pool *Pool, currentPrices map[int]int, 
 	}
 
 	s.FreeTransfers = FreeTransferCount(history, transfers, chips, upcoming)
-	s.Warnings = squadWarnings(s.Members, activeChip)
+	s.Warnings = squadWarnings(s.Members, teams, activeChip)
 	if err := fillNames(db, s.Members); err != nil {
 		return nil, err
 	}
@@ -621,8 +621,9 @@ func fillNames(db *sql.DB, members map[int]*Member) error {
 }
 
 // squadWarnings surfaces data problems that affect the recommendation:
-// unmatched or unprojected squad members and an active free hit.
-func squadWarnings(members map[int]*Member, activeChip string) []string {
+// unmatched or unprojected squad members, an active free hit, and club-limit
+// violations.
+func squadWarnings(members map[int]*Member, teams map[int]projection.PlayerTeamInfo, activeChip string) []string {
 	var w []string
 	for _, m := range members {
 		switch {
@@ -635,5 +636,26 @@ func squadWarnings(members map[int]*Member, activeChip string) []string {
 	if activeChip == "freehit" {
 		w = append(w, "a free hit was active in the last synced gameweek; the reconstructed squad may not be your real squad")
 	}
+
+	// Check 3-per-club limit.
+	clubCounts := map[int]int{}
+	for _, m := range members {
+		if m.TeamID != 0 {
+			clubCounts[m.TeamID]++
+		}
+	}
+	for tid, n := range clubCounts {
+		if n > 3 {
+			name := fmt.Sprintf("team %d", tid)
+			for _, t := range teams {
+				if t.TeamID == tid {
+					name = t.TeamName
+					break
+				}
+			}
+			w = append(w, fmt.Sprintf("%d players from %s (limit 3) — all transfers must reduce this before other moves are allowed", n, name))
+		}
+	}
+
 	return w
 }

@@ -168,6 +168,60 @@ func TestClubOK(t *testing.T) {
 	}
 }
 
+func TestClubOKWithPreExistingViolation(t *testing.T) {
+	// Roster already has 4 from club 5 (e.g. a player transferred between
+	// clubs mid-season). The real FPL game blocks all transfers that don't
+	// fix the violation.
+	roster := map[int]*Member{
+		1: {Element: 1, TeamID: 5},
+		2: {Element: 2, TeamID: 5},
+		3: {Element: 3, TeamID: 5},
+		4: {Element: 4, TeamID: 5},
+		5: {Element: 5, TeamID: 7},
+	}
+
+	// Selling a non-violating player for a non-violating player: still
+	// leaves 4 from club 5 → must be rejected.
+	if clubOK(roster, 5, &PoolPlayer{TeamID: 9}) {
+		t.Error("should reject transfer that leaves 4 from club 5")
+	}
+
+	// Selling one of the violating players for a different club: fixes it → OK.
+	if !clubOK(roster, 1, &PoolPlayer{TeamID: 9}) {
+		t.Error("should accept transfer that reduces club 5 from 4 to 3")
+	}
+
+	// Selling one of the violating players but buying back into the same club:
+	// stays at 4 → rejected.
+	if clubOK(roster, 1, &PoolPlayer{TeamID: 5}) {
+		t.Error("should reject swap within the violating club (stays at 4)")
+	}
+}
+
+func TestPairClubOKWithPreExistingViolation(t *testing.T) {
+	roster := map[int]*Member{
+		1: {Element: 1, TeamID: 5},
+		2: {Element: 2, TeamID: 5},
+		3: {Element: 3, TeamID: 5},
+		4: {Element: 4, TeamID: 5},
+		5: {Element: 5, TeamID: 7},
+		6: {Element: 6, TeamID: 8},
+	}
+
+	// Only one of the pair fixes the violation: other club still at 4.
+	a := Move{OutElement: 5, In: &PoolPlayer{TeamID: 9}}
+	b := Move{OutElement: 6, In: &PoolPlayer{TeamID: 9}}
+	if pairClubOK(roster, a, b) {
+		t.Error("pair that doesn't fix club 5 violation should be rejected")
+	}
+
+	// One move sells from the violating club: fixes it → OK.
+	c := Move{OutElement: 1, In: &PoolPlayer{TeamID: 9}}
+	if !pairClubOK(roster, c, b) {
+		t.Error("pair that fixes the violation should be accepted")
+	}
+}
+
 func TestPairClubOK(t *testing.T) {
 	roster := map[int]*Member{
 		1: {Element: 1, TeamID: 5},
