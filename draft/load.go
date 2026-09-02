@@ -3,6 +3,8 @@ package draft
 import (
 	"database/sql"
 	"fmt"
+
+	"github.com/lib/pq"
 )
 
 // LoadLeagues returns all draft leagues stored for a season.
@@ -171,6 +173,31 @@ func LoadElementAvailability(db *sql.DB, season int, elements []int) (map[int]El
 			return nil, err
 		}
 		out[a.Element] = a
+	}
+	return out, rows.Err()
+}
+
+// LoadPlayerNames returns player_id -> display name from the players table.
+func LoadPlayerNames(db *sql.DB, playerIDs []int) (map[int]string, error) {
+	if len(playerIDs) == 0 {
+		return map[int]string{}, nil
+	}
+	rows, err := db.Query(`
+		SELECT id, first_name || ' ' || last_name
+		FROM players WHERE id = ANY($1)`, pq.Array(playerIDs))
+	if err != nil {
+		return nil, fmt.Errorf("loading player names: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[int]string{}
+	for rows.Next() {
+		var id int
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		out[id] = name
 	}
 	return out, rows.Err()
 }

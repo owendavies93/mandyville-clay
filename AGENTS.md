@@ -10,6 +10,7 @@
 - `cmd/backtest/` — CLI for season-level and rolling in-season backtests, `-grade-recommendations`, and `-classic-sim` (rolling classic season simulator)
 - `cmd/transfers/` — CLI to recommend transfers for both games: classic (default) via `-game classic`, draft via `-game draft`
 - `cmd/draft/` — Bubble Tea TUI for live draft management
+- `cmd/recommendations/` — CLI to list and display past transfer recommendations from both games
 - `cmd/squad/` — CLI to select the optimal Classic FPL opening squad within budget
 - `PERFORMANCE.md` — Backtest results, experiment history, improvement roadmap
 

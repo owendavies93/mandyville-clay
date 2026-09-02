@@ -131,6 +131,11 @@ func LoadRecommendationRuns(db *sql.DB) ([]RecommendationRun, error) {
 	return runs, nil
 }
 
+// LoadRunCandidates loads the candidate rows for a single run.
+func LoadRunCandidates(db *sql.DB, runID int) ([]LoggedCandidate, error) {
+	return loadRunCandidates(db, runID)
+}
+
 func loadRunCandidates(db *sql.DB, runID int) ([]LoggedCandidate, error) {
 	rows, err := db.Query(`
 		SELECT COALESCE(player_in_id, 0), COALESCE(player_out_id, 0),
@@ -187,4 +192,89 @@ func nullFloat(v *float64) interface{} {
 		return nil
 	}
 	return *v
+}
+
+// LoadRecentRuns returns recent draft recommendation runs for a league and
+// entry, newest first.
+func LoadRecentRuns(db *sql.DB, leagueID, entryID, limit int) ([]RecommendationRun, error) {
+	rows, err := db.Query(`
+		SELECT rr.id, rr.league_id, rr.draft_entry_id, rr.event,
+		       rr.horizon, rr.discount, rr.projection_run_id,
+		       rr.run_time, l.season
+		FROM fpl_draft_recommendation_runs rr
+		JOIN fpl_draft_leagues l ON l.id = rr.league_id
+		WHERE rr.league_id = $1 AND rr.draft_entry_id = $2
+		ORDER BY rr.run_time DESC, rr.id DESC
+		LIMIT $3
+	`, leagueID, entryID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("loading recent draft recommendation runs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RecommendationRun
+	for rows.Next() {
+		var r RecommendationRun
+		var projRun sql.NullInt64
+		if err := rows.Scan(&r.ID, &r.LeagueID, &r.EntryID, &r.Event,
+			&r.Horizon, &r.Discount, &projRun, &r.RunTime, &r.Season); err != nil {
+			return nil, err
+		}
+		if projRun.Valid {
+			v := int(projRun.Int64)
+			r.ProjectionRunID = &v
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// LoadSingleRun loads a single recommendation run by ID with all its
+// candidates.
+func LoadSingleRun(db *sql.DB, runID int) (*RecommendationRun, error) {
+	var r RecommendationRun
+	var projRun sql.NullInt64
+	err := db.QueryRow(`
+		SELECT rr.id, rr.league_id, rr.draft_entry_id, rr.event,
+		       rr.horizon, rr.discount, rr.projection_run_id,
+		       rr.run_time, l.season
+		FROM fpl_draft_recommendation_runs rr
+		JOIN fpl_draft_leagues l ON l.id = rr.league_id
+		WHERE rr.id = $1
+	`, runID).Scan(&r.ID, &r.LeagueID, &r.EntryID, &r.Event,
+		&r.Horizon, &r.Discount, &projRun, &r.RunTime, &r.Season)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("loading draft recommendation run %d: %w", runID, err)
+	}
+	if projRun.Valid {
+		v := int(projRun.Int64)
+		r.ProjectionRunID = &v
+	}
+
+	r.Candidates, err = loadRunCandidates(db, r.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// LoadLatestRunForEvent loads the most recent draft run for a given league,
+// entry and gameweek, with all its candidates. Returns nil if none exists.
+func LoadLatestRunForEvent(db *sql.DB, leagueID, entryID, event int) (*RecommendationRun, error) {
+	var runID int
+	err := db.QueryRow(`
+		SELECT id FROM fpl_draft_recommendation_runs
+		WHERE league_id = $1 AND draft_entry_id = $2 AND event = $3
+		ORDER BY run_time DESC LIMIT 1
+	`, leagueID, entryID, event).Scan(&runID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("finding latest draft run for GW%d: %w", event, err)
+	}
+	return LoadSingleRun(db, runID)
 }

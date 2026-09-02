@@ -3,6 +3,9 @@ package classic
 import (
 	"database/sql"
 	"fmt"
+	"time"
+
+	"github.com/lib/pq"
 )
 
 // RecommendationRun is one classic cmd/transfers invocation, ready to be
@@ -20,6 +23,7 @@ type RecommendationRun struct {
 	FreeTransfers   int
 	Bank            int
 	ProjectionRunID *int
+	RunTime         time.Time
 	Rows            []RecommendationRow
 }
 
@@ -187,4 +191,149 @@ func nullInt(v *int) interface{} {
 		return nil
 	}
 	return *v
+}
+
+// LoadRecommendationRuns returns recent classic recommendation runs for an
+// entry, newest first, with their headline rows loaded.
+func LoadRecommendationRuns(db *sql.DB, entryID, limit int) ([]RecommendationRun, error) {
+	rows, err := db.Query(`
+		SELECT id, classic_entry_id, event, run_time, horizon, beam_width,
+		       max_transfers, min_gain, plan_value, baseline_value,
+		       free_transfers, bank, projection_run_id
+		FROM fpl_classic_recommendation_runs
+		WHERE classic_entry_id = $1
+		ORDER BY run_time DESC, id DESC
+		LIMIT $2`, entryID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("loading classic recommendation runs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RecommendationRun
+	for rows.Next() {
+		var r RecommendationRun
+		var projRun sql.NullInt64
+		if err := rows.Scan(&r.ID, &r.EntryID, &r.Event, &r.RunTime,
+			&r.Horizon, &r.BeamWidth, &r.MaxTransfers, &r.MinGain,
+			&r.PlanValue, &r.BaselineValue, &r.FreeTransfers, &r.Bank,
+			&projRun); err != nil {
+			return nil, err
+		}
+		if projRun.Valid {
+			v := int(projRun.Int64)
+			r.ProjectionRunID = &v
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// LoadRecommendationRun loads a single run by ID with all its rows.
+func LoadRecommendationRun(db *sql.DB, runID int) (*RecommendationRun, error) {
+	var r RecommendationRun
+	var projRun sql.NullInt64
+	err := db.QueryRow(`
+		SELECT id, classic_entry_id, event, run_time, horizon, beam_width,
+		       max_transfers, min_gain, plan_value, baseline_value,
+		       free_transfers, bank, projection_run_id
+		FROM fpl_classic_recommendation_runs
+		WHERE id = $1`, runID).Scan(&r.ID, &r.EntryID, &r.Event, &r.RunTime,
+		&r.Horizon, &r.BeamWidth, &r.MaxTransfers, &r.MinGain,
+		&r.PlanValue, &r.BaselineValue, &r.FreeTransfers, &r.Bank,
+		&projRun)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("loading classic recommendation run %d: %w", runID, err)
+	}
+	if projRun.Valid {
+		v := int(projRun.Int64)
+		r.ProjectionRunID = &v
+	}
+
+	r.Rows, err = loadClassicRunRows(db, r.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// LoadLatestRunForEvent loads the most recent run for a given gameweek,
+// with all its rows. Returns nil if none exists.
+func LoadLatestRunForEvent(db *sql.DB, entryID, event int) (*RecommendationRun, error) {
+	var runID int
+	err := db.QueryRow(`
+		SELECT id FROM fpl_classic_recommendation_runs
+		WHERE classic_entry_id = $1 AND event = $2
+		ORDER BY run_time DESC LIMIT 1`, entryID, event).Scan(&runID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("finding latest classic run for GW%d: %w", event, err)
+	}
+	return LoadRecommendationRun(db, runID)
+}
+
+// LoadRunHeadlineRows loads only the immediate transfer rows for a set of
+// runs (for listing headlines without fetching every row).
+func LoadRunHeadlineRows(db *sql.DB, runIDs []int) (map[int][]RecommendationRow, error) {
+	if len(runIDs) == 0 {
+		return map[int][]RecommendationRow{}, nil
+	}
+	rows, err := db.Query(`
+		SELECT run_id, step_event, kind,
+		       COALESCE(player_in_id, 0), COALESCE(player_out_id, 0),
+		       COALESCE(element_in, 0), COALESCE(element_out, 0),
+		       COALESCE(position, ''), hit_cost, COALESCE(expected_gain, 0),
+		       is_immediate
+		FROM fpl_classic_recommendations
+		WHERE run_id = ANY($1) AND is_immediate AND kind = 'transfer'
+		ORDER BY run_id, id`, pq.Array(runIDs))
+	if err != nil {
+		return nil, fmt.Errorf("loading headline rows: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[int][]RecommendationRow{}
+	for rows.Next() {
+		var runID int
+		var r RecommendationRow
+		if err := rows.Scan(&runID, &r.StepEvent, &r.Kind,
+			&r.PlayerInID, &r.PlayerOutID, &r.ElementIn, &r.ElementOut,
+			&r.Position, &r.HitCost, &r.ExpectedGain, &r.IsImmediate); err != nil {
+			return nil, err
+		}
+		out[runID] = append(out[runID], r)
+	}
+	return out, rows.Err()
+}
+
+func loadClassicRunRows(db *sql.DB, runID int) ([]RecommendationRow, error) {
+	rows, err := db.Query(`
+		SELECT step_event, kind,
+		       COALESCE(player_in_id, 0), COALESCE(player_out_id, 0),
+		       COALESCE(element_in, 0), COALESCE(element_out, 0),
+		       COALESCE(position, ''), hit_cost, COALESCE(expected_gain, 0),
+		       is_immediate
+		FROM fpl_classic_recommendations
+		WHERE run_id = $1
+		ORDER BY id`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("loading classic recommendation rows: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RecommendationRow
+	for rows.Next() {
+		var r RecommendationRow
+		if err := rows.Scan(&r.StepEvent, &r.Kind,
+			&r.PlayerInID, &r.PlayerOutID, &r.ElementIn, &r.ElementOut,
+			&r.Position, &r.HitCost, &r.ExpectedGain, &r.IsImmediate); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
