@@ -435,6 +435,125 @@ func buildTeamStrengths(rows *sql.Rows, db *sql.DB) (map[int]*TeamStrength, erro
 	return result, nameRows.Err()
 }
 
+// FillPromotedTeamPriors fills in a promoted-team average prior for any
+// current-season PL team that is missing from the strength map (typically
+// teams promoted with no recent PL history). The prior is the average
+// offensive and defensive rating across all promoted teams in the database
+// (teams appearing in the PL for a season without having appeared in the
+// immediately preceding season).
+func FillPromotedTeamPriors(db *sql.DB, strengths map[int]*TeamStrength, targetSeason int) error {
+	// Current-season PL teams.
+	currentTeams := map[int]bool{}
+	currentRows, err := db.Query(`
+		SELECT DISTINCT home_team_id FROM fixtures
+		WHERE competition_id = $1 AND season = $2
+	`, englishPLCompetitionID, targetSeason)
+	if err != nil {
+		return fmt.Errorf("loading current PL teams: %w", err)
+	}
+	defer currentRows.Close()
+	for currentRows.Next() {
+		var id int
+		if err := currentRows.Scan(&id); err != nil {
+			return err
+		}
+		currentTeams[id] = true
+	}
+	if err := currentRows.Err(); err != nil {
+		return err
+	}
+
+	// Which current teams are missing from the strengths map?
+	var missing []int
+	for id := range currentTeams {
+		if _, ok := strengths[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	// Compute promoted-team average from historical data: teams that
+	// appeared in the PL for a season without appearing the previous
+	// season, excluding the current season and partial seasons (<30 matches).
+	promotedRow := db.QueryRow(`
+		WITH pl_teams AS (
+			SELECT DISTINCT season, home_team_id AS team_id FROM fixtures
+			WHERE competition_id = $1
+			UNION
+			SELECT DISTINCT season, away_team_id FROM fixtures
+			WHERE competition_id = $1
+		),
+		promoted AS (
+			SELECT pt.season, pt.team_id
+			FROM pl_teams pt
+			WHERE pt.season < $2
+			  AND NOT EXISTS (
+				SELECT 1 FROM pl_teams pt2
+				WHERE pt2.team_id = pt.team_id AND pt2.season = pt.season - 1
+			  )
+			  AND pt.season > (SELECT MIN(season) FROM pl_teams)
+		)
+		SELECT AVG(sub.avg_xg_for), AVG(sub.avg_xg_against)
+		FROM (
+			SELECT p.season, p.team_id,
+			       AVG(ftp.xg) AS avg_xg_for,
+			       AVG(opp.xg) AS avg_xg_against
+			FROM promoted p
+			JOIN fixtures_team_performance ftp
+			  ON ftp.team_id = p.team_id
+			JOIN fixtures f
+			  ON f.id = ftp.fixture_id AND f.competition_id = $1 AND f.season = p.season
+			JOIN fixtures_team_performance opp
+			  ON opp.fixture_id = f.id AND opp.team_id != ftp.team_id
+			GROUP BY p.season, p.team_id
+			HAVING COUNT(*) >= 30
+		) sub
+	`, englishPLCompetitionID, targetSeason)
+
+	var avgOff, avgDef sql.NullFloat64
+	if err := promotedRow.Scan(&avgOff, &avgDef); err != nil {
+		return fmt.Errorf("computing promoted-team prior: %w", err)
+	}
+	if !avgOff.Valid || !avgDef.Valid {
+		// No historical promoted-team data; leave them missing (engine
+		// falls back to league average in FixtureMultipliers).
+		return nil
+	}
+
+	// Load names for the missing teams.
+	nameMap := map[int]string{}
+	nameRows, err := db.Query(`SELECT id, name FROM teams WHERE id = ANY($1)`, missing)
+	if err != nil {
+		return fmt.Errorf("loading promoted team names: %w", err)
+	}
+	defer nameRows.Close()
+	for nameRows.Next() {
+		var id int
+		var name string
+		if err := nameRows.Scan(&id, &name); err != nil {
+			return err
+		}
+		nameMap[id] = name
+	}
+
+	csProb := math.Exp(-avgDef.Float64)
+	for _, id := range missing {
+		strengths[id] = &TeamStrength{
+			TeamID:                id,
+			TeamName:              nameMap[id],
+			OffensiveRating:       avgOff.Float64,
+			DefensiveRating:       avgDef.Float64,
+			CleanSheetProb:        csProb,
+			GoalsConcededPerMatch: avgDef.Float64,
+			Matches:               0, // synthetic prior, no real matches
+		}
+	}
+
+	return nil
+}
+
 // PlayerTeamInfo holds a player's current team and whether it's a PL team.
 type PlayerTeamInfo struct {
 	TeamID   int

@@ -220,6 +220,9 @@ func (e *Engine) loadPrior() ([]Player, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading team strengths: %w", err)
 	}
+	if err := FillPromotedTeamPriors(e.DB, e.TeamStrengths, e.TargetSeason); err != nil {
+		return nil, fmt.Errorf("filling promoted team priors: %w", err)
+	}
 	e.computeLeagueAvgOff()
 
 	e.PositionNames, err = LoadPositionNames(e.DB)
