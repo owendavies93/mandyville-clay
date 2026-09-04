@@ -123,7 +123,7 @@ func TestEvaluateSwapsRespectsPosition(t *testing.T) {
 		98: p(98, "newfwd", PosFWD, 8),
 	}
 
-	cands := EvaluateSwaps(squad, freeAgents, 5, 1, 1.0)
+	cands := EvaluateSwaps(squad, freeAgents, nil, 5, 1, 1.0)
 	// 5 defenders and 3 forwards are all worse than the 8-point free
 	// agents, so every same-position swap is a candidate; cross-position
 	// swaps must never appear.
@@ -134,6 +134,47 @@ func TestEvaluateSwapsRespectsPosition(t *testing.T) {
 		if c.In.Position != c.Out.Position {
 			t.Errorf("cross-position swap: %s out vs %s in", c.Out.Position, c.In.Position)
 		}
+	}
+}
+
+// TestEvaluateSwapsSurfacesDeadSlots covers the case that a horizon-bound
+// marginal-XI gain cannot see: a player who has left the league sits on the
+// bench projecting nothing, so dropping him gains nothing over the horizon
+// even though his slot is worthless for the whole season.
+func TestEvaluateSwapsSurfacesDeadSlots(t *testing.T) {
+	// A full squad of strong forwards, plus a fourth-choice FWD who is
+	// gone. He never makes the XI, so no swap for him can gain anything.
+	squad := makeSquad(nil, 0)
+	gone := p(31, "gone", PosFWD, 0)
+	squad[31] = gone
+
+	// The replacement is a bench forward too: better than nothing over the
+	// season, but not good enough to crack the XI over the horizon.
+	freeAgents := map[int]*Player{
+		99: {ID: 99, Name: "replacement", Position: PosFWD,
+			GWPoints: map[int]float64{5: 0, 6: 0, 7: 0, 8: 40}},
+	}
+
+	if cands := EvaluateSwaps(squad, freeAgents, nil, 5, 3, 1.0); len(cands) != 0 {
+		t.Fatalf("without a dead set, got %d candidates, want 0", len(cands))
+	}
+
+	cands := EvaluateSwaps(squad, freeAgents, map[int]bool{31: true}, 5, 3, 1.0)
+	if len(cands) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(cands))
+	}
+	c := cands[0]
+	if !c.DeadSlot {
+		t.Error("candidate not marked as a dead slot")
+	}
+	if math.Abs(c.Gain) > 1e-9 {
+		t.Errorf("Gain = %.3f, want 0 (the horizon cannot see the cost)", c.Gain)
+	}
+	if math.Abs(c.OutROS) > 1e-9 {
+		t.Errorf("OutROS = %.3f, want 0", c.OutROS)
+	}
+	if math.Abs(c.ROSGain()-40) > 1e-9 {
+		t.Errorf("ROSGain = %.3f, want 40", c.ROSGain())
 	}
 }
 

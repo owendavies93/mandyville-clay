@@ -97,6 +97,23 @@ plus fixture-level projections (computed in-process, draft scoring rules).
 Every swap is valued by its marginal effect on the optimised starting XI
 over the horizon, not the raw player-points delta.
 
+The `H2H` and `ROS` columns are context, not decision metrics. `ROS` is the
+rest-of-season points swing, useful for spotting swaps that look good over
+the horizon but cost points later. `H2H` discounts the gain by the players'
+consistency difference; it is not thresholded on, because it measures a
+floor difference at player rather than XI level (overstating the variance
+effect several-fold), its sign is unconditional where a head-to-head manager
+wants less variance only when favoured, and `Consistency` correlates about
++0.56 with projected points, so penalising it partly just penalises good
+players.
+
+A horizon-bound XI gain cannot see a **dead roster slot** — a player the
+draft game lists as gone (status `u`/`n`) who projects nothing for the rest
+of the season. He is already benched, so dropping him gains zero over the
+next few gameweeks even though the slot is worthless for the whole season.
+These are reported separately, ranked by the replacement's rest-of-season
+points, and bypass `-min-gain` entirely.
+
 Flags:
 
 | Flag | Default | Description |

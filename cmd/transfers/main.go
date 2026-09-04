@@ -243,7 +243,12 @@ func runDraft(db *sql.DB, writeCfg *projection.DBConfig, leagueID, season, horiz
 		}
 	}
 
-	candidates := draft.EvaluateSwaps(myRoster, freeAgents, startGW, horizon, discount)
+	dead, err := deadSlots(db, season, myRoster, elementByPlayer, startGW)
+	if err != nil {
+		return err
+	}
+
+	candidates := draft.EvaluateSwaps(myRoster, freeAgents, dead, startGW, horizon, discount)
 
 	order, err := draft.LoadWaiverOrder(db, league.ID)
 	if err != nil {
@@ -251,9 +256,12 @@ func runDraft(db *sql.DB, writeCfg *projection.DBConfig, leagueID, season, horiz
 	}
 	probs := draft.ClaimProbabilities(draft.DefaultWaiverModel(), order, my.ID, rivals, freeAgents, startGW, horizon, discount)
 
-	recommended := selectCandidates(candidates, minGain, top)
+	recommended, deadFills := selectCandidates(candidates, minGain, top)
 	for i := range recommended {
 		recommended[i].SuccessProb = floatPtr(probs[recommended[i].In.ID])
+	}
+	for i := range deadFills {
+		deadFills[i].SuccessProb = floatPtr(probs[deadFills[i].In.ID])
 	}
 	assignClaimOrder(recommended)
 
@@ -264,9 +272,10 @@ func runDraft(db *sql.DB, writeCfg *projection.DBConfig, leagueID, season, horiz
 	printXI(myRoster, startGW)
 	printXIHorizon(myRoster, startGW, horizon)
 
+	printDeadSlots(myRoster, dead, deadFills, startGW)
 	printCandidates("Free-agent transfers (act now)", recommended, startGW)
 	printWaiverClaims("Waiver claims (in priority order)", recommended, startGW)
-	if len(recommended) == 0 {
+	if len(recommended) == 0 && len(deadFills) == 0 {
 		fmt.Println("\nNo swaps clear the minimum gain threshold — hold.")
 	}
 
@@ -288,7 +297,13 @@ func runDraft(db *sql.DB, writeCfg *projection.DBConfig, leagueID, season, horiz
 		}
 		defer wdb.Close()
 
-		logRun := buildLogRun(league.ID, my.ID, startGW, horizon, discount, recommended, elementByPlayer)
+		// Dead-slot fills are advice too, so they are graded alongside the
+		// threshold-cleared swaps.
+		logged := make([]draft.Candidate, 0, len(recommended)+len(deadFills))
+		logged = append(logged, recommended...)
+		logged = append(logged, deadFills...)
+
+		logRun := buildLogRun(league.ID, my.ID, startGW, horizon, discount, logged, elementByPlayer)
 		runID, err := draft.SaveRecommendationRun(wdb, &logRun)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to log recommendations: %v\n", err)
@@ -393,20 +408,126 @@ func toPlayers(out *projection.ProjectionOutput) map[int]*squad.Player {
 	return pool
 }
 
-// selectCandidates returns the top N candidates at or above the gain
-// threshold, preserving the ranked order.
-func selectCandidates(cands []draft.Candidate, minGain float64, top int) []draft.Candidate {
-	var out []draft.Candidate
+// deadFillsPerSlot is how many replacements to list for each dead slot.
+const deadFillsPerSlot = 3
+
+// deadSlots returns the set of my players whose roster slot is worthless for
+// the rest of the season: the draft game has them gone (sold, loaned out or
+// unregistered) and the engine projects them nothing from here on. Holding
+// such a player costs a slot every remaining gameweek, which a horizon-bound
+// marginal-XI gain cannot express.
+func deadSlots(db *sql.DB, season int, roster map[int]*draft.Player, elementByPlayer map[int]int, startGW int) (map[int]bool, error) {
+	var elems []int
+	playerByElement := map[int]int{}
+	for id := range roster {
+		if el, ok := elementByPlayer[id]; ok {
+			elems = append(elems, el)
+			playerByElement[el] = id
+		}
+	}
+
+	avail, err := draft.LoadElementAvailability(db, season, elems)
+	if err != nil {
+		return nil, err
+	}
+
+	dead := map[int]bool{}
+	for el, a := range avail {
+		status := strings.TrimSpace(a.Status)
+		if status != "u" && status != "n" {
+			continue
+		}
+		id := playerByElement[el]
+		if draft.RestOfSeason(roster[id], startGW) > 0 {
+			continue
+		}
+		dead[id] = true
+	}
+	return dead, nil
+}
+
+// selectCandidates splits the ranked candidates into normal recommendations
+// and dead-slot replacements. Normal swaps are thresholded on the marginal
+// XI gain. Dead-slot swaps bypass the threshold entirely: the slot is
+// already worth nothing, so any positive replacement is an improvement, and
+// they are ranked by rest-of-season points rather than by horizon gain
+// because the horizon is exactly what fails to see the cost.
+//
+// H2HGain is deliberately not the threshold or the sort key. It is a
+// floor-difference measure taken at player rather than XI level, which
+// overstates the variance effect several-fold; its sign is unconditional
+// even though a head-to-head manager wants less variance only when
+// favoured; and Consistency correlates about +0.56 with projected points,
+// so penalising it partly just penalises good players. In practice the
+// adjustment exceeds the gain itself for the large majority of candidates,
+// which would leave it deciding the recommendation. It is reported for
+// context instead.
+func selectCandidates(cands []draft.Candidate, minGain float64, top int) (normal, deadFills []draft.Candidate) {
 	for _, c := range cands {
+		if c.DeadSlot {
+			deadFills = append(deadFills, c)
+			continue
+		}
 		if c.Gain < minGain {
 			continue
 		}
-		out = append(out, c)
-		if len(out) >= top {
-			break
+		if len(normal) < top {
+			normal = append(normal, c)
 		}
 	}
-	return out
+
+	sort.SliceStable(deadFills, func(i, j int) bool {
+		return deadFills[i].ROSGain() > deadFills[j].ROSGain()
+	})
+	kept := map[int]int{}
+	var trimmed []draft.Candidate
+	for _, c := range deadFills {
+		if kept[c.Out.ID] >= deadFillsPerSlot {
+			continue
+		}
+		kept[c.Out.ID]++
+		trimmed = append(trimmed, c)
+	}
+	return normal, trimmed
+}
+
+// printDeadSlots reports rostered players who will not score again this
+// season, with the best available replacements.
+func printDeadSlots(roster map[int]*draft.Player, dead map[int]bool, fills []draft.Candidate, startGW int) {
+	if len(dead) == 0 {
+		return
+	}
+
+	byOut := map[int][]draft.Candidate{}
+	for _, c := range fills {
+		byOut[c.Out.ID] = append(byOut[c.Out.ID], c)
+	}
+
+	ids := make([]int, 0, len(dead))
+	for id := range dead {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return roster[ids[i]].Name < roster[ids[j]].Name })
+
+	fmt.Println("Dead roster slots (drop regardless of gain):")
+	for _, id := range ids {
+		p := roster[id]
+		fmt.Printf("  %s (%s) — 0 projected points for the rest of the season\n", p.Name, p.Position)
+		cs := byOut[id]
+		if len(cs) == 0 {
+			fmt.Println("    no free agent in this position projects any points")
+			continue
+		}
+		for i, c := range cs {
+			row := fmt.Sprintf("    %d. %-22s ROS %6.1f  gain %5.2f  H2H %5.2f",
+				i+1, truncate(c.In.Name, 22), c.InROS, c.Gain, c.H2HGain)
+			if c.SuccessProb != nil {
+				row += fmt.Sprintf("  (%.0f%% chance)", *c.SuccessProb*100)
+			}
+			fmt.Println(row)
+		}
+	}
+	fmt.Println()
 }
 
 // assignClaimOrder groups candidates by their dropped player and assigns
@@ -539,7 +660,7 @@ func printCandidates(title string, cands []draft.Candidate, startGW int) {
 		return
 	}
 
-	header := fmt.Sprintf("  %-3s %-22s %-22s %-4s %7s %7s", "#", "Drop", "In", "Pos", "Gain", "H2H")
+	header := fmt.Sprintf("  %-3s %-22s %-22s %-4s %7s %7s %7s", "#", "Drop", "In", "Pos", "Gain", "H2H", "ROS")
 	for i := 0; i < len(cands[0].PerGW); i++ {
 		header += fmt.Sprintf(" %6s", fmt.Sprintf("GW%d", startGW+i))
 	}
@@ -549,8 +670,8 @@ func printCandidates(title string, cands []draft.Candidate, startGW int) {
 	for i, c := range cands {
 		drop := truncate(c.Out.Name, 22)
 		in := truncate(c.In.Name, 22)
-		row := fmt.Sprintf("  %-3d %-22s %-22s %-4s %7.2f %7.2f",
-			i+1, drop, in, c.Position, c.Gain, c.H2HGain)
+		row := fmt.Sprintf("  %-3d %-22s %-22s %-4s %7.2f %7.2f %+7.1f",
+			i+1, drop, in, c.Position, c.Gain, c.H2HGain, c.ROSGain())
 		for _, g := range c.PerGW {
 			row += fmt.Sprintf(" %6.2f", g)
 		}
@@ -586,7 +707,8 @@ func printWaiverClaims(title string, cands []draft.Candidate, startGW int) {
 		cs := groups[outID]
 		fmt.Printf("  Drop %s (%s) for:\n", cs[0].Out.Name, cs[0].Position)
 		for i, c := range cs {
-			row := fmt.Sprintf("    %d. %-22s gain %5.2f  H2H %5.2f", i+1, truncate(c.In.Name, 22), c.Gain, c.H2HGain)
+			row := fmt.Sprintf("    %d. %-22s gain %5.2f  H2H %5.2f  ROS %+6.1f",
+				i+1, truncate(c.In.Name, 22), c.Gain, c.H2HGain, c.ROSGain())
 			for _, g := range c.PerGW {
 				row += fmt.Sprintf("  %5.2f", g)
 			}
@@ -656,6 +778,8 @@ type jsonCandidate struct {
 	Gain         float64   `json:"gain"`
 	Undiscounted float64   `json:"undiscounted_gain"`
 	H2HGain      float64   `json:"h2h_gain"`
+	ROSGain      float64   `json:"ros_gain"`
+	DeadSlot     bool      `json:"dead_slot"`
 	SuccessProb  *float64  `json:"success_probability,omitempty"`
 	PerGW        []float64 `json:"per_gameweek"`
 	ElementIn    int       `json:"element_in"`
@@ -674,6 +798,8 @@ func writeJSON(path string, cands []draft.Candidate, probs map[int]float64, elem
 			Gain:         c.Gain,
 			Undiscounted: c.Undiscounted,
 			H2HGain:      c.H2HGain,
+			ROSGain:      c.ROSGain(),
+			DeadSlot:     c.DeadSlot,
 			SuccessProb:  floatPtr(probs[c.In.ID]),
 			PerGW:        c.PerGW,
 			ElementIn:    elementByPlayer[c.In.ID],

@@ -17,15 +17,46 @@ type Candidate struct {
 	H2HGain      float64  // discounted gain, adjusted for consistency
 	SuccessProb  *float64 // P(target survives to my turn); nil for free agents
 	ClaimOrder   int      // 1-based position within its drop group, 0 if unset
+	OutROS       float64  // Out's projected points to the end of the season
+	InROS        float64  // In's projected points to the end of the season
+	DeadSlot     bool     // Out is worthless for the rest of the season
+}
+
+// ROSGain is the rest-of-season points swing of the swap. Unlike Gain it
+// ignores the horizon and the starting XI, so it is a blunt measure of
+// long-run squad value rather than a decision metric.
+func (c Candidate) ROSGain() float64 { return c.InROS - c.OutROS }
+
+// RestOfSeason totals a player's projected points from fromGW to the end of
+// the projected schedule.
+func RestOfSeason(p *Player, fromGW int) float64 {
+	if p == nil {
+		return 0
+	}
+	var total float64
+	for gw, pts := range p.GWPoints {
+		if gw >= fromGW {
+			total += pts
+		}
+	}
+	return total
 }
 
 // EvaluateSwaps evaluates every same-position swap of a rostered player for
 // a free agent, returning candidates ranked by discounted gain (descending).
 // Only free agents with a non-empty projection are considered; the caller is
 // responsible for surfacing unmatched elements separately.
-func EvaluateSwaps(roster, freeAgents map[int]*Player, startGW, horizon int, discount float64) []Candidate {
+//
+// dead is the set of rostered player ids whose slots are worthless for the
+// rest of the season. Their swaps are kept even when the horizon gain is
+// zero, because a dead slot costs the whole season rather than the horizon,
+// and no marginal-XI measure over a few gameweeks can express that. Pass nil
+// when no such players are known.
+func EvaluateSwaps(roster, freeAgents map[int]*Player, dead map[int]bool, startGW, horizon int, discount float64) []Candidate {
 	var out []Candidate
 	for _, drop := range roster {
+		isDead := dead[drop.ID]
+		outROS := RestOfSeason(drop, startGW)
 		for _, add := range freeAgents {
 			if add.Position != drop.Position {
 				continue
@@ -43,8 +74,11 @@ func EvaluateSwaps(roster, freeAgents map[int]*Player, startGW, horizon int, dis
 				Gain:         gain,
 				Undiscounted: undiscounted,
 				H2HGain:      h2hGain(gain, horizon, drop, add),
+				OutROS:       outROS,
+				InROS:        RestOfSeason(add, startGW),
+				DeadSlot:     isDead,
 			}
-			if c.Gain > 0 {
+			if c.Gain > 0 || (isDead && c.ROSGain() > 0) {
 				out = append(out, c)
 			}
 		}
@@ -108,7 +142,10 @@ type RivalSquad struct {
 func ClaimProbabilities(model WaiverModel, order []WaiverOrder, myEntryID int, rivals []RivalSquad, freeAgents map[int]*Player, startGW, horizon int, discount float64) map[int]float64 {
 	rivalCands := make(map[int][]Candidate, len(rivals))
 	for _, r := range rivals {
-		cands := EvaluateSwaps(r.Roster, freeAgents, startGW, horizon, discount)
+		// Rivals are modelled on raw horizon gain only: we do not know
+		// which of their slots are dead, and changing their behaviour
+		// would recalibrate the survival probabilities.
+		cands := EvaluateSwaps(r.Roster, freeAgents, nil, startGW, horizon, discount)
 		cands = filterCandidates(cands, model.MinValue)
 		if len(cands) > model.MaxCandidates {
 			cands = cands[:model.MaxCandidates]
